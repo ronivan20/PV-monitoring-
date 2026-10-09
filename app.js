@@ -1,4 +1,4 @@
-/* Solar PV Installation Monitoring — browser client.
+/* Solar PV Installation Monitoring — browser client (update 2: West/East sections + contractor assignment).
    Talks only to the database functions (Supabase RPC). No other services. */
 (function () {
   'use strict';
@@ -7,20 +7,25 @@
   var ACT = { mounting: 'Mounting Structure Installation', module: 'PV Module Installation' };
   var ACT_SHORT = { mounting: 'Mounting Structure', module: 'PV Module' };
   var ACTS = ['mounting', 'module'];
+  var DISP_LABEL = { assign: 'Contractor assignment', mounting: 'Mounting Structure Installation', module: 'PV Module Installation' };
   var ST = ['not_started', 'ongoing', 'completed', 'on_hold'];
   var ST_LABEL = { not_started: 'Not Started', ongoing: 'Ongoing', completed: 'Completed', on_hold: 'On Hold' };
   var ROLE_LABEL = { admin: 'Administrator', subcontractor: 'Subcontractor', viewer: 'Viewer (read only)' };
+  var SIDE_LABEL = { W: 'West', E: 'East' };
   var FLAG_LABEL = {
     no_id: 'No table ID in drawing',
     id_format: 'ID written differently',
     duplicate_label: 'Drawn twice in DWG',
-    half_outline: 'Half-width outline'
+    half_outline: 'Only one half drawn',
+    split_unresolved: 'West/East not confirmed'
   };
+  var PALETTE = ['#2563eb', '#7c3aed', '#c026d3', '#0891b2', '#92400e', '#1e3a8a', '#db2777', '#0f766e', '#a78bfa', '#38bdf8'];
   var BLOCKS = [1, 5];
   var POLL_MS = 20000;
   var LS_TOKEN = 'pvm.token';
   var LS_PREFS = 'pvm.prefs';
   var SVGNS = 'http://www.w3.org/2000/svg';
+  var LABEL_PPU = 6.2;
 
   // ------------------------------------------------------------------
   // Small helpers
@@ -35,6 +40,7 @@
         if (v === null || v === undefined || v === false) return;
         if (k === 'class') el.className = v;
         else if (k === 'text') el.textContent = v;
+        else if (k === 'color') el.style.setProperty('--c', v);
         else if (k.slice(0, 2) === 'on' && typeof v === 'function') el.addEventListener(k.slice(2), v);
         else if (k === 'value' || k === 'checked' || k === 'disabled' || k === 'selected' || k === 'hidden') el[k] = v;
         else el.setAttribute(k, v === true ? '' : String(v));
@@ -72,6 +78,12 @@
   function looseId(x) { return normId(x).replace(/[^A-Z0-9]/g, '').replace(/([A-Z])0+(?=\d)/g, '$1'); }
   function natKey(code) { return String(code || '').replace(/\d+/g, function (d) { return ('0000' + d).slice(-5); }); }
   function cmpCode(a, b) { var x = natKey(a), y = natKey(b); return x < y ? -1 : x > y ? 1 : 0; }
+  var SIDE_ORDER = { W: 0, E: 1 };
+  function cmpSec(a, b) {
+    var pa = S.tables.get(a.table_id), pb = S.tables.get(b.table_id);
+    return a.block - b.block || cmpCode(pa && pa.code || 'zzz' + a.table_id, pb && pb.code || 'zzz' + b.table_id)
+      || (a.side in SIDE_ORDER ? SIDE_ORDER[a.side] : 2) - (b.side in SIDE_ORDER ? SIDE_ORDER[b.side] : 2);
+  }
   function initials(u) {
     var n = (u.full_name || u.username || '?').trim();
     var p = n.split(/\s+/);
@@ -97,12 +109,13 @@
       navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
     } else { done(false); }
   }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
 
   // ------------------------------------------------------------------
   // API
   // ------------------------------------------------------------------
-  function ApiError(message, hint, status) {
-    var e = new Error(message); e.hint = hint || null; e.status = status || 0; return e;
+  function ApiError(message, hint, status, details) {
+    var e = new Error(message); e.hint = hint || null; e.status = status || 0; e.details = details || null; return e;
   }
   function rpc(fn, args) {
     var headers = { 'Content-Type': 'application/json', apikey: CFG.supabaseKey };
@@ -121,7 +134,10 @@
             if (res.status >= 500 || !msg) {
               msg = 'The database is not responding (error ' + res.status + '). If nobody has used the app for 7 days, the administrator must restore the Supabase project. Otherwise try again in a minute.';
             }
-            throw ApiError(msg, data && data.hint, res.status);
+            if (data && data.code === 'PGRST202') {
+              msg = 'The app and the database are on different versions. Ask the administrator to run the latest database update.';
+            }
+            throw ApiError(msg, data && data.hint, res.status, data && data.details);
           }
           return data;
         });
@@ -141,20 +157,38 @@
   // State
   // ------------------------------------------------------------------
   var S = {
-    token: null, user: null, kp: {}, tables: new Map(), byBlock: { 1: [], 5: [] }, companies: [],
-    cur: new Map(), history: new Map(), metaVersion: 0, serverTime: null,
-    block: 1, act: 'mounting', view: 'keyplan', selected: null, mode: 'details', form: null,
-    highlight: null, pollTimer: null, polling: false, lastSync: null,
+    token: null, user: null, kp: {}, tables: new Map(), sections: new Map(), secByBlock: { 1: [], 5: [] },
+    companies: [], compById: new Map(), assign: new Map(), cur: new Map(), history: new Map(),
+    metaVersion: 0, serverTime: null, lastSync: null, syncErr: false, polling: false, pollTimer: null,
+    page: 'keyplan', block: 1, disp: 'mounting', selected: null, mode: 'details', form: null,
+    scopeOnly: true, pick: null, multi: new Set(), highlight: null, firstFit: true,
     dash: { block: 'all', act: 'all', status: 'all', company: 'all', page: 0 },
-    admin: { tab: 'accounts', users: null, reviewAll: false }
+    admin: { tab: 'accounts', users: null, log: null, reviewAll: false, afilter: { block: 'all', company: 'all', area: 'all', page: 0 } }
   };
-  function curOf(tableId, act) { return S.cur.get(tableId + '|' + act) || null; }
-  function statusOf(tableId, act) { var u = curOf(tableId, act); return u ? u.status : 'not_started'; }
-  function canEdit() { return S.user && (S.user.role === 'admin' || S.user.role === 'subcontractor'); }
-  function isAdmin() { return S.user && S.user.role === 'admin'; }
+  function curOf(sid, act) { return S.cur.get(sid + '|' + act) || null; }
+  function statusOf(sid, act) { var u = curOf(sid, act); return u ? u.status : 'not_started'; }
+  function isAdmin() { return !!S.user && S.user.role === 'admin'; }
+  function isSub() { return !!S.user && S.user.role === 'subcontractor'; }
+  function canAssign() { return !!S.user && (S.user.role === 'admin' || (S.user.role === 'subcontractor' && S.user.can_assign)); }
+  function counted(s) { return !!s.code && s.is_active; }
+  function parentOf(s) { return S.tables.get(s.table_id); }
+  function siblingOf(s) {
+    var p = parentOf(s); if (!p) return null;
+    var other = p.sections.filter(function (id) { return id !== s.id; })[0];
+    return other ? S.sections.get(other) : null;
+  }
+  function asgOf(sid) { return S.assign.get(sid) || null; }
+  function company(id) { return S.compById.get(id) || null; }
+  function companyName(id) { var c = company(id); return c ? c.name : ''; }
+  function colorOf(id) { var c = company(id); return (c && c.color) || '#9aa5b0'; }
   function activeCompanies() { return S.companies.filter(function (c) { return c.is_active; }); }
-  function companyName(id) { var c = S.companies.find(function (x) { return x.id === id; }); return c ? c.name : ''; }
-  function counted(t) { return !!t.code && t.is_active; }
+  function inMyScope(s) { var a = asgOf(s.id); return !!(a && S.user && S.user.company_id && a.company_id === S.user.company_id); }
+  function canUpdate(s) {
+    if (!S.user || !s || !counted(s)) return false;
+    if (S.user.role === 'admin') return true;
+    return S.user.role === 'subcontractor' && inMyScope(s);
+  }
+  function secLabel(s) { return s.code || (parentOf(s) && parentOf(s).code ? parentOf(s).code + (s.side || '?') : 'NO ID'); }
 
   // ------------------------------------------------------------------
   // Screens
@@ -186,7 +220,7 @@
   }
   function showApp() {
     showOnly('screen-app');
-    setView(S.view || 'keyplan', true);
+    setPage(S.page || 'keyplan', true);
     startPolling();
   }
 
@@ -203,11 +237,11 @@
     }
     var p = prefs();
     if (BLOCKS.indexOf(p.block) >= 0) S.block = p.block;
-    if (ACTS.indexOf(p.act) >= 0) S.act = p.act;
+    if (['assign', 'mounting', 'module'].indexOf(p.disp) >= 0) S.disp = p.disp;
     var tok = store.get(LS_TOKEN);
     if (!tok) { showLogin(); return; }
     S.token = tok;
-    loadBootstrap().then(function () { showApp(); }).catch(function (e) {
+    loadBootstrap().then(function () { afterLogin(); showApp(); }).catch(function (e) {
       if (e.hint === 'password') return showPasswordScreen(true);
       if (e.hint === 'session') { store.set(LS_TOKEN, null); S.token = null; return showLogin(); }
       showLogin(e.message);
@@ -216,48 +250,72 @@
 
   function loadBootstrap() {
     return rpc('get_bootstrap', { p_token: S.token }).then(function (d) {
+      if (d.version !== 2) throw ApiError('The database needs the latest update (update 2). Ask the administrator to run it.', 'version', 0);
       S.kp = {};
       d.keyplans.forEach(function (k) { S.kp[k.block] = k; });
-      S.tables = new Map(); S.byBlock = { 1: [], 5: [] };
-      d.tables.forEach(function (t) {
-        S.tables.set(t.id, t);
-        (S.byBlock[t.block] = S.byBlock[t.block] || []).push(t);
+      S.tables = new Map();
+      d.tables.forEach(function (t) { t.sections = []; S.tables.set(t.id, t); });
+      S.sections = new Map(); S.secByBlock = { 1: [], 5: [] };
+      d.sections.forEach(function (s) {
+        S.sections.set(s.id, s);
+        (S.secByBlock[s.block] = S.secByBlock[s.block] || []).push(s);
+        var p = S.tables.get(s.table_id); if (p) p.sections.push(s.id);
+      });
+      S.tables.forEach(function (t) {
+        t.sections.sort(function (a, b) { var x = S.sections.get(a).side || 'Z', y = S.sections.get(b).side || 'Z'; return x === 'W' ? -1 : y === 'W' ? 1 : 0; });
       });
       S.companies = d.companies || [];
+      S.compById = new Map(); S.companies.forEach(function (c) { S.compById.set(c.id, c); });
+      S.assign = new Map(); (d.assignments || []).forEach(function (a) { S.assign.set(a.section_id, a); });
       S.cur = new Map();
-      d.current.forEach(function (u) { S.cur.set(u.table_id + '|' + u.activity, u); });
+      d.current.forEach(function (u) { S.cur.set(u.section_id + '|' + u.activity, u); });
       S.history = new Map();
       S.metaVersion = d.meta_version;
       S.serverTime = d.server_time;
       S.lastSync = new Date();
-      if (S.selected && !S.tables.has(S.selected)) { S.selected = null; S.mode = 'details'; }
+      if (S.selected && !S.sections.has(S.selected)) { S.selected = null; S.mode = 'details'; }
+      S.multi.forEach(function (id) { if (!S.sections.has(id)) S.multi.delete(id); });
       applyUser(d.user);
       KP.block = null; // force rebuild
     });
   }
 
+  // first view after signing in: subcontractors start on their own scope
+  function afterLogin() {
+    S.firstFit = true;
+    if (isSub()) {
+      S.scopeOnly = true;
+      if (S.disp === 'assign') S.disp = 'mounting';
+      var cnt = { 1: 0, 5: 0 };
+      S.assign.forEach(function (a, sid) { if (a.company_id === S.user.company_id) { var s = S.sections.get(sid); if (s) cnt[s.block]++; } });
+      if (cnt[1] || cnt[5]) S.block = cnt[5] > cnt[1] ? 5 : 1;
+    }
+  }
+
   function applyUser(u) {
-    var prevRole = S.user && S.user.role;
+    var prev = S.user;
     S.user = u;
     $('#user-name').textContent = u.full_name || u.username;
     $('#user-avatar').textContent = initials(u);
     $('#user-pop-name').textContent = userLabel(u);
     $('#user-pop-role').textContent = ROLE_LABEL[u.role] + (u.company_name ? ' · ' + u.company_name : '');
     $('#tab-admin').hidden = u.role !== 'admin';
-    if (prevRole && prevRole !== u.role) {
-      if (S.view === 'admin' && u.role !== 'admin') setView('keyplan');
-      if (!canEdit() && S.mode !== 'details') { S.mode = 'details'; }
-      renderPanel();
+    $('#btn-scope').hidden = u.role !== 'subcontractor';
+    if (prev && (prev.role !== u.role || prev.can_assign !== u.can_assign || prev.company_id !== u.company_id)) {
+      if (S.page === 'admin' && u.role !== 'admin') setPage('keyplan');
+      if (!canAssign()) { S.pick = null; S.multi.clear(); }
+      if (S.mode !== 'details') { S.mode = 'details'; S.form = null; }
+      if (S.page === 'keyplan') { renderToolbar(); paintStatuses(); renderPanel(); }
     }
   }
 
   // ------------------------------------------------------------------
-  // Views
+  // Pages
   // ------------------------------------------------------------------
-  function setView(v, force) {
+  function setPage(v, force) {
     if (v === 'admin' && !isAdmin()) v = 'keyplan';
-    var changed = v !== S.view;
-    S.view = v;
+    var changed = v !== S.page;
+    S.page = v;
     $$('.tab').forEach(function (b) {
       if (b.dataset.view === v) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
     });
@@ -277,26 +335,29 @@
 
   function renderToolbar() {
     $$('#seg-block button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.block === S.block)); });
-    $$('#seg-act button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.act === S.act)); });
+    $$('#seg-view button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.disp === S.disp)); });
+    $('#btn-scope').setAttribute('aria-pressed', String(S.scopeOnly));
     renderSync();
   }
   function setBlock(b) {
     if (b === S.block) return;
     S.block = b; savePrefs({ block: b });
-    var t = S.tables.get(S.selected);
-    if (t && t.block !== b) { S.selected = null; S.mode = 'details'; }
+    var s = S.sections.get(S.selected);
+    if (s && s.block !== b) { S.selected = null; S.mode = 'details'; S.form = null; }
+    S.multi.clear();
     renderToolbar(); buildKeyplan(); renderPanel();
   }
-  function setAct(a) {
-    if (a === S.act) return;
-    S.act = a; savePrefs({ act: a });
+  function setDisp(d) {
+    if (d === S.disp) return;
+    S.disp = d; savePrefs({ disp: d });
+    if (d !== 'assign') { S.pick = null; S.multi.clear(); }
     renderToolbar(); paintStatuses(); renderPanel();
   }
 
   // ------------------------------------------------------------------
   // Keyplan drawing, zoom and pan
   // ------------------------------------------------------------------
-  var KP = { svg: null, block: null, groups: new Map(), view: { x: 0, y: 0, w: 100, h: 100 }, upp: null, sel: null, pointers: new Map(), gesture: null, anim: null };
+  var KP = { svg: null, block: null, groups: new Map(), view: { x: 0, y: 0, w: 100, h: 100 }, upp: null, sel: null, pointers: new Map(), gesture: null, anim: null, fitToken: null };
 
   function buildKeyplan() {
     var el = $('#kp'); KP.svg = el; el.textContent = '';
@@ -315,19 +376,24 @@
     el.append(gl);
     var gt = svg('g', { class: 'tables' });
     var glb = svg('g', { class: 'labels' });
-    (S.byBlock[S.block] || []).forEach(function (t) {
-      var g = svg('g', { class: 't', 'data-id': t.id });
-      var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      t.geom.h.forEach(function (r) {
-        g.append(svg('rect', { class: 'h', x: r[0], y: r[1], width: r[2], height: r[3] }));
-        x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]);
-      });
-      g.append(svg('rect', { class: 'hit', x: x0, y: y0, width: x1 - x0, height: y1 - y0 }));
-      t._bb = [x0, y0, x1, y1];
-      gt.append(g); KP.groups.set(t.id, g);
-      var c = t.geom.c;
-      var lb = svg('text', { class: 'lbl' + (t.code ? '' : ' noid'), transform: 'translate(' + c[0] + ' ' + c[1] + ') scale(0.1)', 'font-size': t.code ? 13 : 16 });
-      lb.textContent = t.code || 'NO ID';
+    var parents = new Map();
+    (S.secByBlock[S.block] || []).forEach(function (s) {
+      var r = s.geom;
+      var g = svg('g', { class: 't', 'data-id': s.id });
+      g.append(svg('rect', { class: 'h', x: r[0], y: r[1], width: r[2], height: r[3] }));
+      gt.append(g); KP.groups.set(s.id, g);
+      s._bb = [r[0], r[1], r[0] + r[2], r[1] + r[3]];
+      var p = parents.get(s.table_id) || [Infinity, Infinity, -Infinity, -Infinity];
+      parents.set(s.table_id, [Math.min(p[0], s._bb[0]), Math.min(p[1], s._bb[1]), Math.max(p[2], s._bb[2]), Math.max(p[3], s._bb[3])]);
+      var side = svg('text', { class: 'lbl side', transform: 'translate(' + (r[0] + r[2] / 2) + ' ' + (r[1] + 2.0) + ') scale(0.1)', 'font-size': 15 });
+      side.textContent = s.side || '?';
+      glb.append(side);
+    });
+    parents.forEach(function (bb, tid) {
+      var t = S.tables.get(tid);
+      if (t) t._bb = bb;
+      var lb = svg('text', { class: 'lbl' + (t && t.code ? '' : ' noid'), transform: 'translate(' + ((bb[0] + bb[2]) / 2) + ' ' + ((bb[1] + bb[3]) / 2) + ') scale(0.1)', 'font-size': t && t.code ? 13 : 16 });
+      lb.textContent = t && t.code ? t.code : 'NO ID';
       glb.append(lb);
     });
     el.append(gt, glb);
@@ -336,23 +402,44 @@
     KP.block = S.block;
     paintStatuses();
     var tok = KP.fitToken = {};
-    requestAnimationFrame(function () { if (KP.fitToken === tok) fitView(false); });
+    requestAnimationFrame(function () {
+      if (KP.fitToken !== tok) return;
+      if (S.firstFit && isSub() && fitScope(false)) { S.firstFit = false; return; }
+      S.firstFit = false;
+      fitView(false);
+    });
   }
 
-  function tableClass(t) {
+  function dimmed(s) {
+    if (S.highlight) return !S.highlight.has(s.id);
+    if (isSub() && S.scopeOnly) return !inMyScope(s);
+    return false;
+  }
+  function secClass(s) {
     var c = 't';
-    if (!t.code) c += ' noid';
-    else if (!t.is_active) c += ' off';
-    else c += ' s-' + statusOf(t.id, S.act);
-    if (t.id === S.selected) c += ' sel';
-    if (S.highlight && !S.highlight.has(t.id)) c += ' dim';
+    if (S.disp === 'assign') {
+      c += asgOf(s.id) ? ' asg' : ' unasg';
+      if (!s.code) c += ' noid-o';
+    } else if (!s.code) c += ' noid';
+    else if (!s.is_active) c += ' off';
+    else c += ' s-' + statusOf(s.id, S.disp);
+    if (s.id === S.selected) c += ' sel';
+    if (S.multi.has(s.id)) c += ' msel';
+    if (dimmed(s)) c += ' dim';
     return c;
   }
   function paintStatuses() {
-    (S.byBlock[S.block] || []).forEach(function (t) {
-      var g = KP.groups.get(t.id); if (g) g.setAttribute('class', tableClass(t));
+    if (!KP.svg) return;
+    KP.svg.classList.toggle('v-assign', S.disp === 'assign');
+    KP.svg.classList.toggle('picking', S.pick === 'tap');
+    KP.svg.classList.toggle('area-mode', S.pick === 'area');
+    (S.secByBlock[S.block] || []).forEach(function (s) {
+      var g = KP.groups.get(s.id); if (!g) return;
+      g.setAttribute('class', secClass(s));
+      var a = asgOf(s.id);
+      if (a) g.style.setProperty('--c', colorOf(a.company_id)); else g.style.removeProperty('--c');
     });
-    renderTitleblock();
+    renderLegend();
     drawSelMarker();
   }
 
@@ -363,12 +450,12 @@
     if (r.width) KP.upp = v.w / r.width;
     KP.svg.setAttribute('viewBox', v.x + ' ' + v.y + ' ' + v.w + ' ' + v.h);
     var ppu = r.width ? r.width / v.w : 1;
-    KP.svg.classList.toggle('show-labels', ppu >= 6.2);
+    KP.svg.classList.toggle('show-labels', ppu >= LABEL_PPU);
     drawSelMarker(ppu);
   }
   function zoomLimits() {
     var kp = S.kp[S.block]; var r = canvasRect(); var aspect = r.width / Math.max(1, r.height);
-    return { min: 12, max: Math.max(+kp.width, +kp.height * aspect) * 2.5 };
+    return { min: 10, max: Math.max(+kp.width, +kp.height * aspect) * 2.5 };
   }
   function clampCenter(v) {
     var kp = S.kp[S.block]; if (!kp) return v;
@@ -376,25 +463,34 @@
     var ncx = Math.min(Math.max(cx, 0), +kp.width), ncy = Math.min(Math.max(cy, 0), +kp.height);
     return { x: v.x + (ncx - cx), y: v.y + (ncy - cy), w: v.w, h: v.h };
   }
-  function fitView(animate) {
-    var kp = S.kp[S.block]; var r = canvasRect();
-    if (!kp || !r.width || !r.height) return;
-    var W = +kp.width, H = +kp.height;
-    // keep the drawing clear of the legend, zoom buttons and phone panel
+  function fitBox(bb, animate, minW) {
+    var r = canvasRect(); if (!r.width || !r.height) return;
+    var W = bb[2] - bb[0], H = bb[3] - bb[1];
+    if (minW && W < minW) { var cx = (bb[0] + bb[2]) / 2; bb = [cx - minW / 2, bb[1], cx + minW / 2, bb[3]]; W = minW; }
     var padL = 14, padR = 14, padT = 14, padB = 14;
     if (window.innerWidth > 900) {
       var tb = $('#titleblock').getBoundingClientRect();
-      padL = Math.max(padL, tb.width + 24);
-      padR = 70;
-    } else {
-      padR = 58;
-      padB = Math.max(padB, panelCover() + 8);
-    }
+      padL = Math.max(padL, tb.width + 24); padR = 70;
+    } else { padR = 58; padB = Math.max(padB, panelCover() + 8); }
     var availW = Math.max(60, r.width - padL - padR), availH = Math.max(60, r.height - padT - padB);
-    var ppu = Math.min(availW / W, availH / H);
-    var x = -(padL + (availW - W * ppu) / 2) / ppu, y = -(padT + (availH - H * ppu) / 2) / ppu;
-    var v = { x: x, y: y, w: r.width / ppu, h: r.height / ppu };
+    var ppu = Math.min(availW / Math.max(W, 1), availH / Math.max(H, 1));
+    var v = { x: bb[0] - (padL + (availW - W * ppu) / 2) / ppu, y: bb[1] - (padT + (availH - H * ppu) / 2) / ppu, w: r.width / ppu, h: r.height / ppu };
+    KP.fitToken = null;
     if (animate) animateTo(v); else setVB(v);
+  }
+  function fitView(animate) {
+    var kp = S.kp[S.block]; if (!kp) return;
+    fitBox([0, 0, +kp.width, +kp.height], animate);
+  }
+  function fitScope(animate) {
+    var bb = [Infinity, Infinity, -Infinity, -Infinity], n = 0;
+    (S.secByBlock[S.block] || []).forEach(function (s) {
+      if (!inMyScope(s) || !s._bb) return;
+      n++; bb = [Math.min(bb[0], s._bb[0]), Math.min(bb[1], s._bb[1]), Math.max(bb[2], s._bb[2]), Math.max(bb[3], s._bb[3])];
+    });
+    if (!n) return false;
+    fitBox([bb[0] - 6, bb[1] - 6, bb[2] + 6, bb[3] + 6], animate, 60);
+    return true;
   }
   function onResize() {
     if (!KP.svg || $('#view-keyplan').hidden) return;
@@ -415,7 +511,7 @@
   }
   function reducedMotion() { return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
   function animateTo(target) {
-    KP.fitToken = null; // a pending initial fit must not override this move
+    KP.fitToken = null;
     if (KP.anim) cancelAnimationFrame(KP.anim);
     if (reducedMotion()) { setVB(target); return; }
     var from = Object.assign({}, KP.view), t0 = performance.now(), dur = 380;
@@ -427,47 +523,51 @@
     KP.anim = requestAnimationFrame(step);
   }
   function panelCover() {
-    // height of the bottom sheet covering the canvas on phones
     if (window.innerWidth > 900) return 0;
     var p = $('#panel'); if (!p || p.hidden) return 0;
     return p.getBoundingClientRect().height;
   }
-  function zoomToTable(t, animate) {
-    if (!t || !t._bb) return;
+  function zoomToSection(s, animate) {
+    if (!s || !s._bb) return;
     var r = canvasRect(); if (!r.width) return;
     var aspect = r.width / r.height;
-    var w = Math.max(70, (t._bb[2] - t._bb[0]) * 6), hh = w / aspect;
-    var cx = (t._bb[0] + t._bb[2]) / 2, cy = (t._bb[1] + t._bb[3]) / 2;
+    var w = 60, hh = w / aspect;
+    var cx = (s._bb[0] + s._bb[2]) / 2, cy = (s._bb[1] + s._bb[3]) / 2;
     var cover = panelCover(), upp = w / r.width;
     var visibleH = Math.max(120, r.height - cover);
-    var y = cy - (visibleH / 2) * upp;
-    var v = { x: cx - w / 2, y: y, w: w, h: hh };
+    var v = { x: cx - w / 2, y: cy - (visibleH * 0.56) * upp, w: w, h: hh };
     KP.fitToken = null;
     if (animate) animateTo(v); else setVB(v);
   }
-  function ensureVisible(t) {
-    var r = canvasRect(), v = KP.view, bb = t._bb; if (!bb || !r.width) return;
+  function ensureVisible(s) {
+    var r = canvasRect(), v = KP.view, bb = s && s._bb; if (!bb || !r.width) return;
     var cover = panelCover() * (v.h / r.height);
     var inside = bb[0] >= v.x && bb[2] <= v.x + v.w && bb[1] >= v.y && bb[3] <= v.y + v.h - cover;
-    if (!inside) zoomToTable(t, true);
+    if (!inside) zoomToSection(s, true);
   }
   function drawSelMarker(ppu) {
     var L = KP.sel; if (!L) return;
-    L.textContent = '';
-    var t = S.tables.get(S.selected);
-    if (!t || t.block !== S.block || !t._bb) return;
+    $$('.selring, .seltag', L).forEach(function (n) { n.remove(); });
+    var s = S.sections.get(S.selected);
+    if (!s || s.block !== S.block || !s._bb) return;
     var r = canvasRect();
     ppu = ppu || (r.width ? r.width / KP.view.w : 1);
-    var bb = t._bb, pad = 5 / ppu;
+    var bb = s._bb, pad = 4 / ppu;
     L.append(svg('rect', { class: 'selring', x: bb[0] - pad, y: bb[1] - pad, width: bb[2] - bb[0] + 2 * pad, height: bb[3] - bb[1] + 2 * pad }));
-    if (ppu < 6.2) {
-      var text = t.code || 'NO ID', k = 1 / ppu, tw = text.length * 13 * 0.62 + 16, th = 24;
-      var cx = (bb[0] + bb[2]) / 2, ty = bb[1] - pad - (th / 2 + 4) * k;
-      var g = svg('g', { class: 'seltag', transform: 'translate(' + cx + ' ' + ty + ') scale(' + k + ')' });
-      g.append(svg('rect', { x: -tw / 2, y: -th / 2, width: tw, height: th, rx: 4 }));
-      var tx = svg('text', { x: 0, y: 0, 'font-size': 13 }); tx.textContent = text;
-      g.append(tx); L.append(g);
-    }
+    var text = secLabel(s), k = 1 / ppu, tw = text.length * 13 * 0.62 + 16, th = 24;
+    var cx = (bb[0] + bb[2]) / 2, ty = bb[1] - pad - (th / 2 + 4) * k;
+    var g = svg('g', { class: 'seltag', transform: 'translate(' + cx + ' ' + ty + ') scale(' + k + ')' });
+    g.append(svg('rect', { x: -tw / 2, y: -th / 2, width: tw, height: th, rx: 4 }));
+    var tx = svg('text', { x: 0, y: 0, 'font-size': 13 }); tx.textContent = text;
+    g.append(tx); L.append(g);
+  }
+
+  function sectionsInRect(a, b) {
+    var x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x), y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+    return (S.secByBlock[S.block] || []).filter(function (s) {
+      var cx = (s._bb[0] + s._bb[2]) / 2, cy = (s._bb[1] + s._bb[3]) / 2;
+      return cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1;
+    });
   }
 
   function wireCanvas() {
@@ -481,9 +581,14 @@
       KP.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (KP.pointers.size === 1) {
         var tg = e.target && e.target.closest ? e.target.closest('.t') : null;
-        KP.gesture = { type: 'pan', sx: e.clientX, sy: e.clientY, view: Object.assign({}, KP.view), moved: 0, target: tg };
+        if (S.pick === 'area') {
+          KP.gesture = { type: 'area', start: toUser(e.clientX, e.clientY), sx: e.clientX, sy: e.clientY, moved: 0, target: tg };
+        } else {
+          KP.gesture = { type: 'pan', sx: e.clientX, sy: e.clientY, view: Object.assign({}, KP.view), moved: 0, target: tg };
+        }
       } else if (KP.pointers.size === 2) {
         var pts = Array.from(KP.pointers.values());
+        removeAreaRect();
         KP.gesture = { type: 'pinch', d0: Math.max(10, dist(pts[0], pts[1])), m0: mid(pts[0], pts[1]), view: Object.assign({}, KP.view), moved: 99 };
       }
       hideHint();
@@ -493,7 +598,12 @@
       KP.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       var g = KP.gesture; if (!g) return;
       var r = canvasRect();
-      if (g.type === 'pan' && KP.pointers.size === 1) {
+      if (g.type === 'area' && KP.pointers.size === 1) {
+        g.moved = Math.max(g.moved, Math.hypot(e.clientX - g.sx, e.clientY - g.sy));
+        if (g.moved < 5) return;
+        var p = toUser(e.clientX, e.clientY);
+        drawAreaRect(g.start, p);
+      } else if (g.type === 'pan' && KP.pointers.size === 1) {
         var dx = e.clientX - g.sx, dy = e.clientY - g.sy;
         g.moved = Math.max(g.moved, Math.hypot(dx, dy));
         if (g.moved < 5) return;
@@ -518,9 +628,21 @@
       if (!KP.pointers.has(e.pointerId)) return;
       KP.pointers.delete(e.pointerId);
       var g = KP.gesture;
-      if (g && g.type === 'pan' && KP.pointers.size === 0 && g.moved < 6 && e.type === 'pointerup') {
-        if (g.target) selectTable(+g.target.getAttribute('data-id'), { source: 'map' });
-        else if (S.selected && S.mode === 'details') selectTable(null);
+      if (g && KP.pointers.size === 0 && e.type === 'pointerup') {
+        if (g.type === 'area') {
+          removeAreaRect();
+          if (g.moved >= 5) {
+            var hit = sectionsInRect(g.start, toUser(e.clientX, e.clientY));
+            hit.forEach(function (s) { S.multi.add(s.id); });
+            paintStatuses(); renderPanel();
+            if (!hit.length) toast('No sections inside that area. Draw a box around the tables.', 'err');
+          } else if (g.target) toggleMulti(+g.target.getAttribute('data-id'));
+        } else if (g.type === 'pan' && g.moved < 6) {
+          var id = g.target ? +g.target.getAttribute('data-id') : null;
+          if (S.pick === 'tap') { if (id) toggleMulti(id); }
+          else if (id) selectSection(id, { source: 'map' });
+          else if (S.selected && S.mode === 'details') selectSection(null);
+        }
       }
       if (KP.pointers.size === 0) { KP.gesture = null; el.classList.remove('dragging'); }
       else if (KP.pointers.size === 1) {
@@ -529,7 +651,7 @@
       }
     }
     el.addEventListener('pointerup', end);
-    el.addEventListener('pointercancel', end);
+    el.addEventListener('pointercancel', function (e) { removeAreaRect(); end(e); });
     el.addEventListener('wheel', function (e) {
       e.preventDefault();
       var u = toUser(e.clientX, e.clientY);
@@ -542,6 +664,7 @@
       if (e.key === '+' || e.key === '=') zoomCenter(1.5);
       else if (e.key === '-' || e.key === '_') zoomCenter(1 / 1.5);
       else if (e.key === '0') fitView(true);
+      else if (e.key === 'Escape' && S.multi.size) { S.multi.clear(); paintStatuses(); renderPanel(); }
       else if (e.key === 'ArrowLeft') setVB(clampCenter({ x: v.x - v.w * step, y: v.y, w: v.w, h: v.h }));
       else if (e.key === 'ArrowRight') setVB(clampCenter({ x: v.x + v.w * step, y: v.y, w: v.w, h: v.h }));
       else if (e.key === 'ArrowUp') setVB(clampCenter({ x: v.x, y: v.y - v.h * step, w: v.w, h: v.h }));
@@ -551,111 +674,119 @@
     });
     $('#zoom-in').addEventListener('click', function () { zoomCenter(1.6); });
     $('#zoom-out').addEventListener('click', function () { zoomCenter(1 / 1.6); });
-    $('#zoom-fit').addEventListener('click', function () { fitView(true); });
+    $('#zoom-fit').addEventListener('click', function () { if (!(isSub() && S.scopeOnly && fitScope(true))) fitView(true); });
     window.addEventListener('resize', function () { requestAnimationFrame(onResize); });
   }
+  function drawAreaRect(a, b) {
+    var L = KP.sel; if (!L) return;
+    var rect = $('.area-rect', L);
+    if (!rect) { rect = svg('rect', { class: 'area-rect' }); L.append(rect); }
+    rect.setAttribute('x', Math.min(a.x, b.x)); rect.setAttribute('y', Math.min(a.y, b.y));
+    rect.setAttribute('width', Math.abs(a.x - b.x)); rect.setAttribute('height', Math.abs(a.y - b.y));
+  }
+  function removeAreaRect() { var r = KP.sel && $('.area-rect', KP.sel); if (r) r.remove(); }
   function hideHint() { var hEl = $('#canvas-hint'); if (hEl) hEl.classList.add('gone'); }
 
-  // Legend drawn like a drawing title block
-  function renderTitleblock() {
+  // Legend: drawing title block (desktop) and one-line strip (phones)
+  function legendRows() {
+    var list = S.secByBlock[S.block] || [];
+    var rows = [], noid = 0;
+    if (S.disp === 'assign') {
+      var byCo = new Map(), un = 0;
+      list.forEach(function (s) {
+        var a = asgOf(s.id);
+        if (a) byCo.set(a.company_id, (byCo.get(a.company_id) || 0) + 1); else un++;
+      });
+      Array.from(byCo.keys()).sort(function (a, b) { return companyName(a).localeCompare(companyName(b)); }).forEach(function (cid) {
+        rows.push({ sw: function () { return h('span', { class: 'sw c', color: colorOf(cid) }); }, label: companyName(cid), n: byCo.get(cid) });
+      });
+      rows.push({ sw: function () { return h('span', { class: 'sw unasg' }); }, label: 'Unassigned', n: un });
+      return { rows: rows, total: list.length, title: 'Contractor assignment', foot: ['Assigned', fmtPct(list.length - un, list.length)] };
+    }
+    var c = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 }, total = 0;
+    list.forEach(function (s) { if (!s.code) { noid++; return; } if (!s.is_active) return; total++; c[statusOf(s.id, S.disp)]++; });
+    ST.forEach(function (st) { rows.push({ sw: function () { return h('span', { class: 'sw s-' + st }); }, label: ST_LABEL[st], n: c[st] }); });
+    if (noid) rows.push({ sw: function () { return h('span', { class: 'sw noid' }); }, label: 'No section ID', n: noid });
+    return { rows: rows, total: total, title: DISP_LABEL[S.disp], foot: ['Completed', fmtPct(c.completed, total)] };
+  }
+  function renderLegend() {
     var tb = $('#titleblock'); if (!tb) return;
-    var list = S.byBlock[S.block] || [];
-    var counts = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 }, total = 0, noid = 0, off = 0;
-    list.forEach(function (t) {
-      if (!t.code) { noid++; return; }
-      if (!t.is_active) { off++; return; }
-      total++; counts[statusOf(t.id, S.act)]++;
-    });
+    var L = legendRows();
     tb.textContent = '';
-    var head = h('div', { class: 'tb-head' },
-      h('div', { class: 'tb-blk', text: 'Block ' + S.block }),
-      h('div', { class: 'tnum', text: total + ' tables' }),
-      h('div', { class: 'tb-act', text: ACT[S.act] }));
     var rows = h('div', { class: 'tb-rows' });
-    ST.forEach(function (st) {
-      rows.append(h('div', null, h('span', { class: 'sw s-' + st })), h('div', { text: ST_LABEL[st] }), h('div', { class: 'num', text: String(counts[st]) }));
-    });
-    if (noid) rows.append(h('div', null, h('span', { class: 'sw noid' })), h('div', { text: 'No ID in drawing' }), h('div', { class: 'num', text: String(noid) }));
-    var foot = h('div', { class: 'tb-foot' }, h('span', { text: 'Completed' }), h('strong', { class: 'tnum', text: fmtPct(counts.completed, total) }));
-    tb.append(head, rows, foot);
-    // phone version: one line under the toolbar, never over the drawing
+    L.rows.forEach(function (r) { rows.append(h('div', null, r.sw()), h('div', { text: r.label }), h('div', { class: 'num', text: String(r.n) })); });
+    tb.append(h('div', { class: 'tb-head' },
+      h('div', { class: 'tb-blk', text: 'Block ' + S.block }),
+      h('div', { class: 'tnum', text: L.total + ' sections' }),
+      h('div', { class: 'tb-act', text: L.title + (S.disp === 'assign' ? ' (who is responsible, not progress)' : '') })),
+      rows,
+      h('div', { class: 'tb-foot' }, h('span', { text: L.foot[0] }), h('strong', { class: 'tnum', text: L.foot[1] })));
     var strip = $('#legend-strip');
     if (strip) {
       strip.textContent = '';
-      strip.append(h('span', { class: 'ls-title', text: 'B' + S.block + ' · ' + (S.act === 'mounting' ? 'Mounting' : 'PV Module') }));
-      ST.forEach(function (st) {
-        strip.append(h('span', { class: 'ls-item' }, h('span', { class: 'sw s-' + st }), ST_LABEL[st] + ' ', h('b', { text: String(counts[st]) })));
-      });
-      if (noid) strip.append(h('span', { class: 'ls-item' }, h('span', { class: 'sw noid' }), 'No ID ', h('b', { text: String(noid) })));
+      strip.append(h('span', { class: 'ls-title', text: 'B' + S.block + ' · ' + (S.disp === 'assign' ? 'Contractors' : S.disp === 'mounting' ? 'Mounting' : 'PV Module') }));
+      L.rows.forEach(function (r) { strip.append(h('span', { class: 'ls-item' }, r.sw(), r.label + ' ', h('b', { text: String(r.n) }))); });
     }
   }
 
   // ------------------------------------------------------------------
   // Selection and side panel
   // ------------------------------------------------------------------
-  function selectTable(id, opts) {
+  function selectSection(id, opts) {
     opts = opts || {};
     if (S.mode !== 'details' && S.selected && id !== S.selected && S.form && S.form.dirty) {
-      toast('Finish or cancel the update for ' + (S.tables.get(S.selected).code || 'this table') + ' first.', 'err');
+      toast('Finish or cancel the update for ' + secLabel(S.sections.get(S.selected)) + ' first.', 'err');
       return;
     }
     var prev = S.selected;
     S.selected = id;
     S.mode = 'details'; S.form = null;
     [prev, id].forEach(function (x) {
-      var t = S.tables.get(x), g = KP.groups.get(x);
-      if (t && g) g.setAttribute('class', tableClass(t));
+      var s = S.sections.get(x), g = KP.groups.get(x);
+      if (s && g) g.setAttribute('class', secClass(s));
     });
     drawSelMarker();
     renderPanel();
-    var t = S.tables.get(id);
-    if (t) {
-      loadHistory(t.id);
-      if (opts.zoom) zoomToTable(t, true);
-      else if (opts.source === 'map' && window.innerWidth <= 900) requestAnimationFrame(function () { ensureVisible(t); });
+    var s = S.sections.get(id);
+    if (s) {
+      loadHistory(s.id);
+      if (opts.zoom) zoomToSection(s, true);
+      else if (opts.source === 'map' && window.innerWidth <= 900) requestAnimationFrame(function () { ensureVisible(s); });
     }
+  }
+  function toggleMulti(id) {
+    if (!id) return;
+    if (S.multi.has(id)) S.multi.delete(id); else S.multi.add(id);
+    var s = S.sections.get(id), g = KP.groups.get(id);
+    if (s && g) g.setAttribute('class', secClass(s));
+    renderPanel();
   }
 
   function renderPanel() {
     var P = $('#panel'); if (!P) return;
+    var keepScroll = P.scrollTop;
     P.textContent = '';
-    var t = S.tables.get(S.selected);
-    P.classList.toggle('collapsed', !t);
-    if (!t) { renderPanelSummary(P); return; }
-    if (S.mode === 'form') renderForm(P, t);
-    else if (S.mode === 'confirm') renderConfirm(P, t);
-    else renderDetails(P, t);
-  }
-
-  function renderPanelSummary(P) {
-    var list = (S.byBlock[S.block] || []).filter(counted);
-    var c = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 };
-    list.forEach(function (t) { c[statusOf(t.id, S.act)]++; });
-    var mobile = window.innerWidth <= 900;
-    if (mobile) {
-      P.append(h('p', { class: 'panel-sub' }, h('strong', { text: 'Tap a table' }), ' to see its status' + (canEdit() ? ' and update it.' : '.')));
-      return;
+    var s = S.sections.get(S.selected);
+    var tools = S.disp === 'assign' && canAssign() && (S.pick || S.multi.size);
+    P.classList.toggle('collapsed', !s && !tools && !S.highlight);
+    if (S.highlight) {
+      P.append(h('div', { class: 'notice info sibling' }, h('span', { text: 'Showing ' + plural(S.highlight.size, 'section') + ' of one contractor.' }),
+        h('button', { type: 'button', class: 'btn small', text: 'Show all', onclick: function () { S.highlight = null; paintStatuses(); renderPanel(); } })));
     }
-    P.append(
-      h('div', { class: 'stack' },
-        h('div', null, h('h2', { text: 'Block ' + S.block + ' · ' + ACT_SHORT[S.act] }),
-          h('p', { class: 'panel-sub', text: list.length + ' tables with an ID in the drawing' })),
-        statusBar(c, list.length),
-        h('div', { class: 'summary-grid' }, ST.map(function (st) {
-          return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: c[st] + ' · ' + fmtPct(c[st], list.length) })];
-        })),
-        h('div', { class: 'notice info' },
-          h('strong', { text: canEdit() ? 'To update a table' : 'View-only access' }),
-          canEdit()
-            ? h('ol', { class: 'steps' },
-              h('li', { text: 'Choose Block 1 or Block 5 above.' }),
-              h('li', { text: 'Tap the table on the keyplan, or type its ID in the search box.' }),
-              h('li', { text: 'Press Update status, choose the activity, status and company.' }),
-              h('li', { text: 'Check the summary, then press Confirm and save.' }))
-            : h('p', { class: 'small', text: 'Tap a table to see its status, responsible company and history.' }))
-      ));
+    if (s && !tools) {
+      if (S.mode === 'form') renderForm(P, s);
+      else if (S.mode === 'confirm') renderConfirm(P, s);
+      else renderDetails(P, s);
+    } else if (S.disp === 'assign' && canAssign()) renderAssignTools(P);
+    else renderPanelSummary(P);
+    if (S.mode === 'details') P.scrollTop = keepScroll;
   }
 
+  function statusCounts(list, act) {
+    var c = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 };
+    list.forEach(function (s) { c[statusOf(s.id, act)]++; });
+    return c;
+  }
   function statusBar(c, total) {
     var bar = h('div', { class: 'bar', role: 'img', 'aria-label': ST.map(function (s) { return ST_LABEL[s] + ' ' + c[s]; }).join(', ') });
     ['completed', 'ongoing', 'on_hold'].forEach(function (st) {
@@ -666,152 +797,340 @@
     });
     return bar;
   }
-
   function chip(st) { return h('span', { class: 'chip s-' + st, text: ST_LABEL[st] }); }
-
-  function flagNotice(t) {
-    if (!t.flags || !t.flags.length) return null;
-    if (t.flags.indexOf('no_id') >= 0 && !t.code) {
-      return h('div', { class: 'notice err' }, h('strong', { text: 'No table ID in the drawing' }),
-        'This outline has no ID in the DWG or the PDF keyplan, so it is not counted and cannot be updated. ' +
-        (isAdmin() ? 'You can assign the correct ID with Edit table info.' : 'Ask the administrator to assign its ID.'));
-    }
-    var label = t.flags.map(function (f) { return FLAG_LABEL[f] || f; }).join(' · ');
-    return h('div', { class: 'notice warn' }, h('strong', { text: 'Drawing note: ' + label + (t.review_status === 'resolved' ? ' (checked)' : '') }),
-      t.flag_notes || '', t.review_note ? h('div', { class: 'small', text: 'Review: ' + t.review_note }) : null);
+  function cchip(cid, suffix) {
+    if (!cid) return h('span', { class: 'cchip none' }, h('i', { class: 'cdot none' }), h('span', { text: 'Unassigned' }));
+    return h('span', { class: 'cchip' }, h('i', { class: 'cdot', color: colorOf(cid) }), h('span', { text: companyName(cid) + (suffix || '') }));
   }
 
-  function renderDetails(P, t) {
-    var head = h('div', { class: 'panel-head' },
-      h('div', null, h('h2', { text: 'Table' }), h('div', { class: 'panel-tid', text: t.code || 'NO ID' }),
-        h('p', { class: 'panel-sub', text: 'Block ' + t.block + (t.is_active ? '' : ' · excluded from monitoring') })),
-      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', text: '×', onclick: function () { selectTable(null); } }));
-    var stack = h('div', { class: 'stack' }, head, flagNotice(t));
-    if (t.code) {
-      ACTS.forEach(function (a) { stack.append(actCard(t, a)); });
-      stack.append(historyBox(t));
+  function renderPanelSummary(P) {
+    var mobile = window.innerWidth <= 900;
+    var act = S.disp === 'assign' ? 'mounting' : S.disp;
+    if (isSub()) { renderScope(P, mobile); return; }
+    if (mobile) {
+      P.append(h('p', { class: 'panel-sub' }, h('strong', { text: 'Tap a section' }), ' to see its contractor and status' + (isAdmin() ? ' and update it.' : '.')));
+      return;
     }
-    if (isAdmin()) stack.append(h('button', { type: 'button', class: 'btn small', text: 'Edit table info', onclick: function () { openTableEditor(t); } }));
+    var list = (S.secByBlock[S.block] || []).filter(counted);
+    if (S.disp === 'assign') {
+      var assigned = list.filter(function (s) { return asgOf(s.id); }).length;
+      P.append(h('div', { class: 'stack' },
+        h('div', null, h('h2', { text: 'Block ' + S.block + ' · Contractors' }),
+          h('p', { class: 'panel-sub', text: assigned + ' of ' + list.length + ' sections are assigned to a contractor.' })),
+        h('p', { class: 'small muted', text: 'Colours show which company is responsible for each section. They do not show progress: switch to Mounting Structure or PV Module for that.' })));
+      return;
+    }
+    var c = statusCounts(list, act);
+    P.append(h('div', { class: 'stack' },
+      h('div', null, h('h2', { text: 'Block ' + S.block + ' · ' + ACT_SHORT[act] }),
+        h('p', { class: 'panel-sub', text: list.length + ' sections with an ID (each table has a West and an East section)' })),
+      statusBar(c, list.length),
+      h('div', { class: 'summary-grid' }, ST.map(function (st) {
+        return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: c[st] + ' · ' + fmtPct(c[st], list.length) })];
+      })),
+      h('div', { class: 'notice info' },
+        h('strong', { text: isAdmin() ? 'To update a section' : 'View-only access' }),
+        isAdmin()
+          ? h('ol', { class: 'steps' },
+            h('li', { text: 'Choose the block and the activity above.' }),
+            h('li', { text: 'Tap the West or East section of a table, or type its ID in the search box.' }),
+            h('li', { text: 'Press Update status, choose the status and check the company.' }),
+            h('li', { text: 'Check the summary, then press Confirm and save.' }))
+          : h('p', { class: 'small', text: 'Tap a section to see its contractor, status and history.' }))));
+  }
+
+  function renderScope(P, mobile) {
+    var mine = [], byBlock = { 1: 0, 5: 0 };
+    S.sections.forEach(function (s) { if (inMyScope(s) && counted(s)) { mine.push(s); byBlock[s.block]++; } });
+    var act = S.disp === 'assign' ? 'mounting' : S.disp;
+    var here = mine.filter(function (s) { return s.block === S.block; });
+    var co = S.user.company_id;
+    if (mobile) {
+      P.append(h('div', { class: 'sibling' }, cchip(co), h('span', { text: here.length ? plural(here.length, 'section') + ' in Block ' + S.block + '. Tap one to update it.' : 'Nothing assigned to you in Block ' + S.block + '.' })));
+      return;
+    }
+    var stack = h('div', { class: 'stack scope-card' },
+      h('div', null, h('h2', { text: 'Your scope' }), h('div', { class: 'sibling' }, cchip(co))));
+    if (!mine.length) {
+      stack.append(h('div', { class: 'notice warn', text: 'No sections are assigned to your company yet. Ask the administrator to assign your tables.' }));
+      P.append(stack); return;
+    }
+    var c = statusCounts(here, act);
+    stack.append(
+      h('p', { class: 'panel-sub', text: 'Block 1: ' + plural(byBlock[1], 'section') + ' · Block 5: ' + plural(byBlock[5], 'section') }),
+      here.length ? [h('p', { class: 'small', text: ACT_SHORT[act] + ' in Block ' + S.block + ':' }), statusBar(c, here.length),
+        h('div', { class: 'summary-grid' }, ST.map(function (st) {
+          return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: c[st] + ' · ' + fmtPct(c[st], here.length) })];
+        }))] : h('p', { class: 'small muted', text: 'Nothing assigned to you in Block ' + S.block + '. Switch blocks above.' }),
+      h('div', { class: 'tool-row' },
+        h('button', { type: 'button', class: 'btn small', text: 'Zoom to my sections', onclick: function () { if (!fitScope(true)) toast('Nothing assigned to you in this block.', 'err'); } })),
+      h('div', { class: 'notice info' }, h('strong', { text: 'To update a section' }),
+        h('ol', { class: 'steps' },
+          h('li', { text: 'Your sections are shown bright; others are faded (My scope button).' }),
+          h('li', { text: 'Tap the West or East section of a table, or search its ID.' }),
+          h('li', { text: 'Press Update status, choose the activity and status, then confirm.' }))));
     P.append(stack);
   }
 
-  function actCard(t, a) {
-    var u = curOf(t.id, a), st = u ? u.status : 'not_started';
-    var card = h('section', { class: 'act-card', 'aria-label': ACT[a] },
-      h('h3', { text: ACT[a] }),
-      h('div', null, chip(st)));
+  function renderAssignTools(P) {
+    var sel = Array.from(S.multi).map(function (id) { return S.sections.get(id); }).filter(Boolean);
+    sel.sort(cmpSec);
+    var byCo = new Map(), un = 0;
+    sel.forEach(function (s) { var a = asgOf(s.id); if (a) byCo.set(a.company_id, (byCo.get(a.company_id) || 0) + 1); else un++; });
+    var stack = h('div', { class: 'stack' },
+      h('div', null, h('h2', { text: 'Assign contractors · Block ' + S.block }),
+        h('p', { class: 'panel-sub', text: 'Select sections, then choose the company. Assigning does not change any status.' })),
+      h('div', { class: 'tool-row' },
+        h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'tap'), text: 'Tap to select', onclick: function () { setPick(S.pick === 'tap' ? null : 'tap'); } }),
+        h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'area'), text: 'Draw an area', onclick: function () { setPick(S.pick === 'area' ? null : 'area'); } })),
+      h('p', { class: 'mode-note', text: S.pick === 'area' ? 'Drag a box on the keyplan. Every section whose centre is inside is added. Use two fingers or the buttons to move.'
+        : S.pick === 'tap' ? 'Tap sections to add or remove them. Drag to move the keyplan.' : 'Choose a selection tool.' }));
+    stack.append(h('div', { class: 'sel-count', text: sel.length ? plural(sel.length, 'section') + ' selected' : 'No sections selected' }));
+    if (sel.length) {
+      stack.append(h('div', { class: 'sel-list', text: sel.slice(0, 40).map(secLabel).join(', ') + (sel.length > 40 ? ' …' : '') }));
+      var cur = h('div', { class: 'summary-grid' });
+      byCo.forEach(function (n, cid) { cur.append(h('i', { class: 'cdot', color: colorOf(cid) }), h('span', { text: 'Now ' + companyName(cid) }), h('span', { class: 'num', text: String(n) })); });
+      if (un) cur.append(h('i', { class: 'cdot none' }), h('span', { text: 'Now unassigned' }), h('span', { class: 'num', text: String(un) }));
+      stack.append(cur);
+      var areas = new Set(); S.assign.forEach(function (a) { if (a.area) areas.add(a.area); });
+      var selCo = h('select', { id: 'as-company' }, h('option', { value: '', text: activeCompanies().length ? 'Choose the company…' : 'No companies yet' }),
+        activeCompanies().map(function (c) { return h('option', { value: c.id, text: c.name, selected: S.lastAssignCo === c.id }); }));
+      var area = h('input', { id: 'as-area', maxlength: 80, list: 'as-areas', placeholder: 'Optional, e.g. North cluster rows 1-6' });
+      area.value = S.lastArea || '';
+      var dl = h('datalist', { id: 'as-areas' }, Array.from(areas).sort().map(function (a) { return h('option', { value: a }); }));
+      var btnA = h('button', { type: 'button', class: 'btn primary', text: 'Assign' });
+      btnA.addEventListener('click', function () {
+        if (!selCo.value) { toast('Choose the company first.', 'err'); return; }
+        S.lastAssignCo = +selCo.value; S.lastArea = area.value.trim();
+        doAssign(Array.from(S.multi), +selCo.value, area.value.trim(), false);
+      });
+      stack.append(
+        h('div', { class: 'field' }, h('label', { for: 'as-company', text: 'Assign to' }), selCo),
+        h('div', { class: 'field' }, h('label', { for: 'as-area', text: 'Area name' }), area, dl),
+        h('div', { class: 'tool-row' }, btnA,
+          h('button', { type: 'button', class: 'btn', text: 'Unassign', disabled: !byCo.size, onclick: confirmUnassign }),
+          h('button', { type: 'button', class: 'btn ghost', text: 'Clear selection', onclick: function () { S.multi.clear(); paintStatuses(); renderPanel(); } })));
+    }
+    if (!S.pick && !sel.length) {
+      stack.append(h('p', { class: 'small muted', text: 'Tip: tap a section without a selection tool to see its details and history.' }));
+    }
+    P.append(stack);
+  }
+  function setPick(p) {
+    S.pick = p;
+    if (p) { S.selected = null; S.mode = 'details'; }
+    paintStatuses(); renderPanel();
+  }
+  function doAssign(ids, companyId, area, allowReassign) {
+    return call('assign_sections', { p_section_ids: ids, p_company_id: companyId, p_area: area || '', p_allow_reassign: !!allowReassign })
+      .then(function (r) {
+        toast(companyId ? 'Assigned ' + plural(r.changed, 'section') + ' to ' + companyName(companyId) + (r.unchanged ? ' (' + r.unchanged + ' already were).' : '.')
+          : 'Unassigned ' + plural(r.changed, 'section') + '.', 'ok', 6000);
+        S.multi.clear(); closeModal();
+        return loadBootstrap().then(function () { refreshAll(); });
+      })
+      .catch(function (e) {
+        if (e.hint === 'assign_conflict') { showConflict(e, ids, companyId, area); return; }
+        if (e.hint !== 'session' && e.hint !== 'password') toast(e.message, 'err', 8000);
+      });
+  }
+  function showConflict(e, ids, companyId, area) {
+    var list = [];
+    try { list = JSON.parse(e.details || '[]'); } catch (x) { list = []; }
+    var byCo = new Map();
+    list.forEach(function (c) { var k = c.company_id; if (!byCo.has(k)) byCo.set(k, []); byCo.get(k).push(c.code || '(no ID)'); });
+    var conflictIds = new Set(list.map(function (c) { return c.section_id; }));
+    var rest = ids.filter(function (id) { return !conflictIds.has(id); });
+    openModal('Some sections already have a contractor', [
+      h('p', { text: e.message + ' Nothing has been changed yet.' }),
+      h('div', { class: 'stack' }, Array.from(byCo.entries()).map(function (en) {
+        return h('div', null, cchip(en[0], ' · ' + en[1].length), h('div', { class: 'sel-list', text: en[1].slice(0, 30).join(', ') + (en[1].length > 30 ? ' …' : '') }));
+      })),
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn primary', text: 'Reassign all ' + ids.length + ' to ' + companyName(companyId), onclick: function () { doAssign(ids, companyId, area, true); } }),
+        rest.length ? h('button', { type: 'button', class: 'btn', text: 'Assign only the other ' + rest.length, onclick: function () { doAssign(rest, companyId, area, false); } }) : null,
+        h('button', { type: 'button', class: 'btn ghost', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function confirmUnassign() {
+    var ids = Array.from(S.multi).filter(function (id) { return asgOf(id); });
+    openModal('Unassign ' + plural(ids.length, 'section') + '?', [
+      h('p', { text: 'They will show as Unassigned. Their installation statuses and history stay as they are. The change is recorded in the assignment log.' }),
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn primary', text: 'Unassign', onclick: function () { doAssign(ids, null, '', true); } }),
+        h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+
+  function flagNotices(s) {
+    var p = parentOf(s), out = [];
+    if (!s.code) {
+      if (p && !p.code) out.push(h('div', { class: 'notice err' }, h('strong', { text: 'No table ID in the drawing' }),
+        'This table has no ID in the DWG or the PDF keyplan, so its sections are not counted and cannot be updated. ' +
+        (isAdmin() ? 'Use Edit table info to assign its ID.' : 'Ask the administrator to assign its ID.')));
+      else out.push(h('div', { class: 'notice err' }, h('strong', { text: 'West/East not confirmed' }), s.flag_notes || '',
+        isAdmin() ? h('div', { class: 'small', text: 'Use Edit section to set W or E once confirmed.' }) : null));
+      return out;
+    }
+    var flags = (p && p.flags || []).filter(function (f) { return f !== 'no_id'; }).concat(s.flags || []);
+    if (flags.length) {
+      var notes = [p && p.flag_notes, s.flag_notes].filter(Boolean).join(' ');
+      out.push(h('div', { class: 'notice warn' }, h('strong', { text: 'Drawing note: ' + flags.map(function (f) { return FLAG_LABEL[f] || f; }).join(' · ') }),
+        notes, p && p.review_note ? h('div', { class: 'small', text: 'Review: ' + p.review_note }) : null));
+    }
+    return out;
+  }
+
+  function renderDetails(P, s) {
+    var p = parentOf(s), sib = siblingOf(s), a = asgOf(s.id);
+    var head = h('div', { class: 'panel-head' },
+      h('div', null, h('h2', { text: 'Section' }), h('div', { class: 'panel-tid', text: s.code || 'NO ID' }),
+        h('p', { class: 'panel-sub', text: (s.side ? SIDE_LABEL[s.side] + ' half' : 'Half outline') + ' of table ' + (p && p.code ? p.code : '(no ID)') + ' · Block ' + s.block + (s.is_active ? '' : ' · excluded') })),
+      h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', text: '×', onclick: function () { selectSection(null); } }));
+    var stack = h('div', { class: 'stack' }, head);
+    if (sib) stack.append(h('div', { class: 'sibling' }, h('span', { text: 'Other half:' }),
+      h('button', { type: 'button', class: 'link-btn tid', text: secLabel(sib), onclick: function () { selectSection(sib.id); } })));
+    stack.append(h('div', { class: 'sibling' }, h('span', { text: 'Contractor:' }), cchip(a && a.company_id),
+      a && a.area ? h('span', { class: 'small', text: '· ' + a.area }) : null));
+    stack.append(flagNotices(s));
+    if (s.code) {
+      ACTS.forEach(function (act) { stack.append(actCard(s, act)); });
+      if (!canUpdate(s) && S.user.role !== 'viewer' && s.is_active) {
+        stack.append(h('p', { class: 'small muted', text: a ? 'Only ' + companyName(a.company_id) + ' accounts can update this section.' : 'This section is not assigned to your company. Ask the administrator.' }));
+      }
+      stack.append(historyBox(s));
+    }
+    if (isAdmin()) {
+      stack.append(h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn small', text: 'Edit table info', onclick: function () { openTableEditor(p); } }),
+        h('button', { type: 'button', class: 'btn small', text: 'Edit section', onclick: function () { openSectionEditor(s); } })));
+    }
+    P.append(stack);
+  }
+
+  function actCard(s, act) {
+    var u = curOf(s.id, act), st = u ? u.status : 'not_started';
+    var card = h('section', { class: 'act-card', 'aria-label': ACT[act] }, h('h3', { text: ACT[act] }), h('div', null, chip(st)));
     if (u) {
       card.append(h('dl', { class: 'kv' },
         h('dt', { text: 'Company' }), h('dd', null, h('strong', { text: u.company_name })),
         h('dt', { text: 'Updated by' }), h('dd', { text: u.full_name ? u.full_name + ' (' + u.username + ')' : u.username }),
         h('dt', { text: 'Date & time' }), h('dd', { text: fmtTime(u.created_at) }),
         u.remarks ? [h('dt', { text: 'Remarks' }), h('dd', { text: u.remarks })] : null));
-    } else {
-      card.append(h('p', { class: 'small muted', text: 'No update recorded yet.' }));
-    }
-    if (canEdit() && t.is_active) {
-      card.append(h('button', { type: 'button', class: 'btn primary small', text: 'Update status', onclick: function () { openForm(t, a); } }));
-    }
+    } else card.append(h('p', { class: 'small muted', text: 'No update recorded yet.' }));
+    if (canUpdate(s)) card.append(h('button', { type: 'button', class: 'btn primary small', text: 'Update status', onclick: function () { openForm(s, act); } }));
     return card;
   }
 
-  function historyBox(t) {
-    var hist = S.history.get(t.id);
+  function historyBox(s) {
+    var hist = S.history.get(s.id);
     var box = h('details', { class: 'hist-box' });
     if (prefs().histOpen) box.open = true;
     box.addEventListener('toggle', function () { savePrefs({ histOpen: box.open }); });
-    box.append(h('summary', { text: 'History' + (Array.isArray(hist) ? ' (' + hist.length + ')' : '') }));
+    var n = hist && hist.history ? hist.history.length + hist.assignments.length : null;
+    box.append(h('summary', { text: 'History' + (n !== null ? ' (' + n + ')' : '') }));
     if (hist === undefined || hist === 'loading') box.append(h('p', { class: 'small muted', text: 'Loading history…' }));
     else if (hist === 'error') box.append(h('p', { class: 'small muted', text: 'Could not load the history. It will retry on the next refresh.' }));
-    else if (!hist.length) box.append(h('p', { class: 'small muted', text: 'No changes recorded yet.' }));
     else {
-      box.append(h('ul', { class: 'hist' }, hist.map(function (u) {
+      var items = hist.history.map(function (u) { return { at: u.created_at, u: u }; })
+        .concat(hist.assignments.map(function (a) { return { at: a.at, a: a }; }))
+        .sort(function (x, y) { return x.at < y.at ? 1 : -1; });
+      if (!items.length) box.append(h('p', { class: 'small muted', text: 'No changes recorded yet.' }));
+      else box.append(h('ul', { class: 'hist' }, items.map(function (it) {
+        if (it.u) {
+          var u = it.u;
+          return h('li', null,
+            h('div', { class: 'hist-top' }, h('strong', { text: ACT_SHORT[u.activity] }), chip(u.status)),
+            h('div', { class: 'hist-meta', text: fmtTime(u.created_at) + ' · ' + u.company_name + ' · by ' + u.username }),
+            u.remarks ? h('div', { class: 'hist-rem', text: u.remarks }) : null);
+        }
+        var a = it.a;
         return h('li', null,
-          h('div', { class: 'hist-top' }, h('strong', { text: ACT_SHORT[u.activity] }), chip(u.status)),
-          h('div', { class: 'hist-meta', text: fmtTime(u.created_at) + ' · ' + u.company_name + ' · by ' + u.username }),
-          u.remarks ? h('div', { class: 'hist-rem', text: u.remarks }) : null);
+          h('div', { class: 'hist-top' }, h('strong', { text: 'Contractor' }),
+            h('span', { class: 'small', text: (a.prev_company_name || 'Unassigned') + ' → ' + (a.new_company_name || 'Unassigned') })),
+          h('div', { class: 'hist-meta', text: fmtTime(a.at) + ' · by ' + a.username + (a.new_area ? ' · area: ' + a.new_area : '') }));
       })));
     }
     return box;
   }
 
   function loadHistory(id, force) {
-    if (!force && Array.isArray(S.history.get(id))) return;
+    var cur = S.history.get(id);
+    if (!force && cur && cur.history) return;
     S.history.set(id, 'loading');
-    call('get_table_history', { p_table_id: id }).then(function (d) {
-      S.history.set(id, d.history || []);
+    call('get_section_history', { p_section_id: id }).then(function (d) {
+      S.history.set(id, { history: d.history || [], assignments: d.assignments || [] });
     }).catch(function () {
       S.history.set(id, 'error');
     }).then(function () {
-      if (S.selected === id && S.mode === 'details') renderPanel();
+      if (S.selected === id && S.mode === 'details' && S.page === 'keyplan') renderPanel();
     });
   }
 
   // ----- update form -----
-  function openForm(t, a) {
-    if (!canEdit()) return;
-    var u = curOf(t.id, a);
-    var mine = S.user.company_id && S.companies.some(function (c) { return c.id === S.user.company_id && c.is_active; }) ? S.user.company_id : null;
-    var curCompany = u && S.companies.some(function (c) { return c.id === u.company_id && c.is_active; }) ? u.company_id : null;
-    S.form = { tableId: t.id, act: a, status: null, company: curCompany || mine || null, remarks: '', base: u ? u.id : null, dirty: false };
+  function openForm(s, act) {
+    if (!canUpdate(s)) return;
+    var u = curOf(s.id, act), a = asgOf(s.id);
+    S.form = { sid: s.id, act: act, status: null, company: a ? a.company_id : null, remarks: '', base: u ? u.id : null, dirty: false };
     S.mode = 'form';
     renderPanel();
-    if (window.innerWidth <= 900) ensureVisible(t);
+    if (window.innerWidth <= 900) ensureVisible(s);
   }
-  function setFormAct(a) {
-    var f = S.form, t = S.tables.get(f.tableId), u = curOf(t.id, a);
-    f.act = a; f.base = u ? u.id : null;
-    if (u && !f.dirty && S.companies.some(function (c) { return c.id === u.company_id && c.is_active; })) f.company = u.company_id;
-    if (S.act !== a) setAct(a); else renderPanel();
+  function setFormAct(act) {
+    var f = S.form, u = curOf(f.sid, act);
+    f.act = act; f.base = u ? u.id : null;
+    if (S.disp !== act) setDisp(act); else renderPanel();
   }
-  function renderForm(P, t) {
-    var f = S.form, u = curOf(t.id, f.act), cur = u ? u.status : 'not_started';
-    var companies = activeCompanies();
+  function renderForm(P, s) {
+    var f = S.form, u = curOf(s.id, f.act), cur = u ? u.status : 'not_started', a = asgOf(s.id);
     var head = h('div', { class: 'panel-head' },
-      h('div', null, h('h2', { text: 'Update status' }), h('div', { class: 'panel-tid', text: t.code }), h('p', { class: 'panel-sub', text: 'Block ' + t.block })),
+      h('div', null, h('h2', { text: 'Update status' }), h('div', { class: 'panel-tid', text: s.code }),
+        h('p', { class: 'panel-sub', text: SIDE_LABEL[s.side] + ' half of ' + parentOf(s).code + ' · Block ' + s.block })),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel update', text: '×', onclick: cancelForm }));
-    var actPick = h('div', { class: 'act-pick', role: 'group', 'aria-label': 'Activity' }, ACTS.map(function (a) {
-      return h('button', { type: 'button', 'aria-pressed': String(f.act === a), text: ACT_SHORT[a], onclick: function () { setFormAct(a); } });
+    var actPick = h('div', { class: 'act-pick', role: 'group', 'aria-label': 'Activity' }, ACTS.map(function (x) {
+      return h('button', { type: 'button', 'aria-pressed': String(f.act === x), text: ACT_SHORT[x], onclick: function () { setFormAct(x); } });
     }));
     var stPick = h('div', { class: 'status-pick', role: 'group', 'aria-label': 'New status' }, ST.map(function (st) {
-      return h('button', {
-        type: 'button', 'aria-pressed': String(f.status === st),
-        onclick: function () { f.status = st; f.dirty = true; renderPanel(); }
-      }, h('span', { class: 'sw s-' + st }), ST_LABEL[st]);
+      return h('button', { type: 'button', 'aria-pressed': String(f.status === st), onclick: function () { f.status = st; f.dirty = true; renderPanel(); } },
+        h('span', { class: 'sw s-' + st }), ST_LABEL[st]);
     }));
-    var sel = h('select', { id: 'f-company', onchange: function (e) { f.company = e.target.value ? +e.target.value : null; f.dirty = true; renderPanel(); } },
-      h('option', { value: '', text: companies.length ? 'Choose the company…' : 'No companies yet' }),
-      companies.map(function (c) { return h('option', { value: c.id, text: c.name, selected: f.company === c.id }); }));
+    var coField;
+    if (a) {
+      coField = h('div', { class: 'field' }, h('span', { class: 'label', text: 'Responsible contractor (assigned)' }), h('div', null, cchip(a.company_id)));
+    } else {
+      var companies = activeCompanies();
+      var sel = h('select', { id: 'f-company', onchange: function (e) { f.company = e.target.value ? +e.target.value : null; f.dirty = true; renderPanel(); } },
+        h('option', { value: '', text: companies.length ? 'Choose the company…' : 'No companies yet' }),
+        companies.map(function (c) { return h('option', { value: c.id, text: c.name, selected: f.company === c.id }); }));
+      coField = h('div', { class: 'field' }, h('label', { for: 'f-company', text: 'Company responsible (section not assigned yet)' }), sel);
+    }
     var rem = h('textarea', { id: 'f-remarks', maxlength: 500, placeholder: 'Optional. For example: waiting for materials.' });
     rem.value = f.remarks;
     rem.addEventListener('input', function () { f.remarks = rem.value; f.dirty = true; });
-    var ready = f.status && f.company;
-    var stack = h('div', { class: 'stack' }, head,
+    var ready = f.status && (a || f.company);
+    P.append(h('div', { class: 'stack' }, head,
       h('div', { class: 'field' }, h('span', { class: 'label', text: 'Activity' }), actPick),
       h('p', { class: 'small' }, 'Current: ', chip(cur), u ? ' · ' + u.company_name + ' · ' + fmtTime(u.created_at) : ' · no update yet'),
       h('div', { class: 'field' }, h('span', { class: 'label', text: 'New status' }), stPick),
-      h('div', { class: 'field' }, h('label', { for: 'f-company', text: 'Company responsible for this work' }), sel,
-        companies.length ? null : h('p', { class: 'hint', text: 'The administrator must add contractor and subcontractor names first.' })),
+      coField,
       h('div', { class: 'field' }, h('label', { for: 'f-remarks', text: 'Remarks (optional)' }), rem),
       h('div', { class: 'form-actions' },
         h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: cancelForm }),
         h('button', { type: 'button', class: 'btn primary', text: 'Review update', disabled: !ready, onclick: function () { S.mode = 'confirm'; renderPanel(); } })),
-      !ready ? h('p', { class: 'hint', text: !f.status ? 'Choose the new status.' : 'Choose the responsible company.' }) : null);
-    P.append(stack);
+      !ready ? h('p', { class: 'hint', text: !f.status ? 'Choose the new status.' : 'Choose the responsible company.' }) : null));
   }
   function cancelForm() { S.mode = 'details'; S.form = null; renderPanel(); }
 
-  function renderConfirm(P, t) {
-    var f = S.form, u = curOf(t.id, f.act), cur = u ? u.status : 'not_started';
-    var same = u && u.status === f.status && u.company_id === f.company;
+  function renderConfirm(P, s) {
+    var f = S.form, u = curOf(s.id, f.act), cur = u ? u.status : 'not_started', a = asgOf(s.id);
+    var coId = a ? a.company_id : f.company;
+    var same = u && u.status === f.status && u.company_id === coId;
     var btnSave = h('button', { type: 'button', class: 'btn primary', id: 'btn-save', text: 'Confirm and save', onclick: function () { saveUpdate(btnSave); } });
     P.append(h('div', { class: 'stack' },
       h('div', null, h('h2', { text: 'Confirm update' }), h('p', { class: 'panel-sub', text: 'Check the details. Nothing is saved until you press Confirm and save.' })),
       h('table', { class: 'confirm-tbl' }, h('tbody', null,
-        h('tr', null, h('th', { text: 'Table' }), h('td', null, h('strong', { class: 'tid', text: t.code }), ' · Block ' + t.block)),
+        h('tr', null, h('th', { text: 'Section' }), h('td', null, h('strong', { class: 'tid', text: s.code }), ' · ' + SIDE_LABEL[s.side] + ' half of ' + parentOf(s).code + ' · Block ' + s.block)),
         h('tr', null, h('th', { text: 'Activity' }), h('td', { text: ACT[f.act] })),
         h('tr', null, h('th', { text: 'Status' }), h('td', null, chip(cur), h('span', { class: 'arrow', text: '→' }), chip(f.status))),
-        h('tr', null, h('th', { text: 'Company' }), h('td', null, h('strong', { text: companyName(f.company) }))),
+        h('tr', null, h('th', { text: 'Contractor' }), h('td', null, cchip(coId))),
         h('tr', null, h('th', { text: 'Remarks' }), h('td', { text: f.remarks.trim() || '—' })),
         h('tr', null, h('th', { text: 'Saved by' }), h('td', { text: userLabel(S.user) })),
         h('tr', null, h('th', { text: 'Date & time' }), h('td', { text: 'Recorded by the server when you save' })))),
@@ -823,27 +1142,26 @@
   }
 
   function saveUpdate(btn) {
-    var f = S.form, t = S.tables.get(f.tableId);
+    var f = S.form, s = S.sections.get(f.sid);
     btn.disabled = true; btn.textContent = 'Saving…';
     $$('#panel button').forEach(function (b) { b.disabled = true; });
     call('submit_update', {
-      p_table_id: t.id, p_activity: f.act, p_status: f.status, p_company_id: f.company,
+      p_section_id: s.id, p_activity: f.act, p_status: f.status, p_company_id: asgOf(s.id) ? null : f.company,
       p_remarks: f.remarks.trim() || null, p_expected_update_id: f.base
     }).then(function (d) {
       var u = d.update;
-      S.cur.set(u.table_id + '|' + u.activity, u);
+      S.cur.set(u.section_id + '|' + u.activity, u);
       S.mode = 'details'; S.form = null;
-      var hist = S.history.get(t.id);
-      if (Array.isArray(hist)) hist.unshift(u);
+      var hist = S.history.get(s.id);
+      if (hist && hist.history) hist.history.unshift(u);
       paintStatuses(); renderPanel();
-      toast('Saved. ' + t.code + ' · ' + ACT_SHORT[u.activity] + ' is now ' + ST_LABEL[u.status] + ' (' + fmtTime(u.created_at) + ').', 'ok', 6000);
-      if (S.view === 'dashboard') renderDashboard();
+      toast('Saved. ' + s.code + ' · ' + ACT_SHORT[u.activity] + ' is now ' + ST_LABEL[u.status] + ' (' + fmtTime(u.created_at) + ').', 'ok', 6000);
     }).catch(function (e) {
       if (e.hint === 'session' || e.hint === 'password') return;
-      if (e.hint === 'conflict') {
+      if (e.hint === 'conflict' || e.hint === 'forbidden') {
         toast(e.message, 'err', 9000);
         S.mode = 'details'; S.form = null;
-        poll(true).then(function () { loadHistory(t.id, true); renderPanel(); });
+        poll(true).then(function () { loadHistory(s.id, true); renderPanel(); });
         return;
       }
       toast('Not saved. ' + e.message, 'err', 9000);
@@ -859,40 +1177,39 @@
     var n = normId(q), l = looseId(q);
     if (!n) return [];
     var out = [];
-    S.tables.forEach(function (t) {
-      if (!t.code) return;
-      var c = normId(t.code), cl = looseId(t.code), score;
-      if (c === n) score = 0; else if (cl === l) score = 1; else if (c.indexOf(n) === 0) score = 2;
-      else if (c.indexOf(n) > 0) score = 3; else if (l.length >= 2 && cl.indexOf(l) >= 0) score = 4; else return;
-      out.push({ t: t, score: score });
+    S.sections.forEach(function (s) {
+      if (!s.code) return;
+      var c = normId(s.code), cl = looseId(s.code), pc = normId(parentOf(s).code), score;
+      if (c === n) score = 0; else if (cl === l) score = 1; else if (pc === n || looseId(pc) === l) score = 2;
+      else if (c.indexOf(n) === 0) score = 3; else if (c.indexOf(n) > 0) score = 4;
+      else if (l.length >= 2 && cl.indexOf(l) >= 0) score = 5; else return;
+      out.push({ s: s, score: score });
     });
     out.sort(function (a, b) {
-      return a.score - b.score || (a.t.block === S.block ? 0 : 1) - (b.t.block === S.block ? 0 : 1) || cmpCode(a.t.code, b.t.code);
+      return a.score - b.score || (a.s.block === S.block ? 0 : 1) - (b.s.block === S.block ? 0 : 1) || cmpSec(a.s, b.s);
     });
-    return out.slice(0, 10).map(function (x) { return x.t; });
+    return out.slice(0, 10).map(function (x) { return x.s; });
   }
   function renderSearchList(q) {
     var ul = $('#search-list'); ul.textContent = '';
     SR.items = searchMatches(q); SR.idx = SR.items.length ? 0 : -1;
     if (!q.trim()) { ul.hidden = true; return; }
-    if (!SR.items.length) {
-      ul.append(h('li', { class: 'empty', text: 'No table with ID “' + q.trim() + '”.' }));
-    } else {
-      SR.items.forEach(function (t, i) {
-        ul.append(h('li', {
-          role: 'option', 'aria-selected': String(i === SR.idx), id: 'sr-' + i,
-          onmousedown: function (e) { e.preventDefault(); chooseSearch(t); }
-        }, h('span', { text: t.code }), h('span', { class: 'blk', text: 'Block ' + t.block })));
-      });
-    }
+    if (!SR.items.length) ul.append(h('li', { class: 'empty', text: 'No section with ID “' + q.trim() + '”.' }));
+    else SR.items.forEach(function (s, i) {
+      ul.append(h('li', {
+        role: 'option', 'aria-selected': String(i === SR.idx), id: 'sr-' + i,
+        onmousedown: function (e) { e.preventDefault(); chooseSearch(s); }
+      }, h('span', { text: s.code }), h('span', { class: 'blk', text: SIDE_LABEL[s.side] + ' · Block ' + s.block })));
+    });
     ul.hidden = false;
   }
-  function chooseSearch(t) {
+  function chooseSearch(s) {
     var inp = $('#search');
     inp.value = ''; $('#search-list').hidden = true; inp.blur();
-    if (S.view !== 'keyplan') setView('keyplan');
-    if (t.block !== S.block) setBlock(t.block);
-    selectTable(t.id, { zoom: true });
+    if (S.page !== 'keyplan') setPage('keyplan');
+    if (S.pick) { S.pick = null; paintStatuses(); }
+    if (s.block !== S.block) setBlock(s.block);
+    selectSection(s.id, { zoom: true });
   }
   function wireSearch() {
     var inp = $('#search');
@@ -908,7 +1225,7 @@
         $$('li', ul).forEach(function (li, i) { li.setAttribute('aria-selected', String(i === SR.idx)); });
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        var exact = SR.items.filter(function (t) { return normId(t.code) === normId(inp.value) || looseId(t.code) === looseId(inp.value); });
+        var exact = SR.items.filter(function (s) { return normId(s.code) === normId(inp.value) || looseId(s.code) === looseId(inp.value); });
         var pick = SR.idx >= 0 ? SR.items[SR.idx] : null;
         if (exact.length === 1) pick = exact[0];
         if (pick) chooseSearch(pick); else renderSearchList(inp.value);
@@ -937,35 +1254,34 @@
       }
       var changed = [];
       d.current.forEach(function (u) {
-        var k = u.table_id + '|' + u.activity, prev = S.cur.get(k);
+        var k = u.section_id + '|' + u.activity, prev = S.cur.get(k);
         if (!prev || prev.id < u.id) { S.cur.set(k, u); changed.push(u); }
       });
       if (changed.length) {
         changed.forEach(function (u) {
-          var hist = S.history.get(u.table_id);
-          if (Array.isArray(hist) && !hist.some(function (x) { return x.id === u.id; })) hist.unshift(u);
+          var hist = S.history.get(u.section_id);
+          if (hist && hist.history && !hist.history.some(function (x) { return x.id === u.id; })) hist.history.unshift(u);
         });
-        if (S.view === 'keyplan') {
+        if (S.page === 'keyplan') {
           paintStatuses();
-          if (S.selected && changed.some(function (u) { return u.table_id === S.selected; })) {
+          if (S.selected && changed.some(function (u) { return u.section_id === S.selected; })) {
             if (S.mode === 'details') renderPanel();
-            else toast('Someone just updated ' + S.tables.get(S.selected).code + '. Check its status before saving.', 'err', 7000);
-          } else if (!S.selected) renderPanel();
-        } else if (S.view === 'dashboard') renderDashboard();
+            else toast('Someone just updated ' + secLabel(S.sections.get(S.selected)) + '. Check its status before saving.', 'err', 7000);
+          } else if (!S.selected && !S.multi.size) renderPanel();
+        } else if (S.page === 'dashboard') renderDashboard();
       }
     }).catch(function (e) {
       S.syncErr = e.hint === 'network' || e.status >= 500;
     }).then(function () { S.polling = false; renderSync(); });
   }
   function refreshAll() {
-    if (S.view === 'keyplan') { if (KP.block !== S.block) buildKeyplan(); else { rebuildIfNeeded(); } renderPanel(); }
-    else if (S.view === 'dashboard') renderDashboard();
-    else if (S.view === 'admin') renderAdmin();
-  }
-  function rebuildIfNeeded() {
-    var keep = Object.assign({}, KP.view);
-    buildKeyplan();
-    requestAnimationFrame(function () { setVB(keep); });
+    if (S.page === 'keyplan') {
+      var keep = KP.svg && KP.block === S.block ? Object.assign({}, KP.view) : null;
+      buildKeyplan();
+      if (keep) { KP.fitToken = null; requestAnimationFrame(function () { setVB(keep); }); }
+      renderPanel();
+    } else if (S.page === 'dashboard') renderDashboard();
+    else if (S.page === 'admin') renderAdmin();
   }
   function renderSync() {
     var el = $('#sync'); if (!el) return;
@@ -977,6 +1293,7 @@
   // ------------------------------------------------------------------
   // Dashboard
   // ------------------------------------------------------------------
+  function allSections() { var a = []; BLOCKS.forEach(function (b) { a = a.concat(S.secByBlock[b] || []); }); return a; }
   function renderDashboard(resetPage) {
     var root = $('#dash'); if (!root) return;
     var F = S.dash; if (resetPage) F.page = 0;
@@ -984,17 +1301,21 @@
     root.textContent = '';
     var blocks = F.block === 'all' ? BLOCKS : [+F.block];
     var acts = F.act === 'all' ? ACTS : [F.act];
-    var all = []; BLOCKS.forEach(function (b) { all = all.concat(S.byBlock[b] || []); });
-    var inScope = all.filter(function (t) { return counted(t) && blocks.indexOf(t.block) >= 0; });
+    var inScope = allSections().filter(function (s) {
+      if (!counted(s) || blocks.indexOf(s.block) < 0) return false;
+      var a = asgOf(s.id);
+      if (F.company === 'none') return !a;
+      if (F.company !== 'all') return !!a && String(a.company_id) === F.company;
+      return true;
+    });
 
     root.append(h('div', { class: 'page-head' },
       h('div', null, h('h1', { text: 'Project overview' }),
-        h('p', { text: 'Counts use only tables that have an ID in the drawing. A table with no saved update counts as Not Started.' })),
+        h('p', { text: 'Counts use West and East sections that have an ID in the drawing. A section with no saved update counts as Not Started.' })),
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn small', text: 'Download current status (CSV)', onclick: exportCurrent }),
         h('button', { type: 'button', class: 'btn small', text: 'Download full history (CSV)', onclick: exportHistory }))));
 
-    // filters
     function sel(id, label, value, options, key) {
       return h('div', { class: 'field' }, h('label', { for: id, text: label }),
         h('select', { id: id, onchange: function (e) { F[key] = e.target.value; renderDashboard(true); } },
@@ -1004,45 +1325,49 @@
       sel('f-block', 'Block', F.block, [['all', 'Both blocks'], ['1', 'Block 1'], ['5', 'Block 5']], 'block'),
       sel('f-act', 'Activity', F.act, [['all', 'Both activities'], ['mounting', ACT_SHORT.mounting], ['module', ACT_SHORT.module]], 'act'),
       sel('f-status', 'Status', F.status, [['all', 'All statuses']].concat(ST.map(function (s) { return [s, ST_LABEL[s]]; })), 'status'),
-      sel('f-company', 'Company', F.company, [['all', 'All companies']].concat(S.companies.map(function (c) { return [String(c.id), c.name + (c.is_active ? '' : ' (inactive)')]; })), 'company'))));
+      sel('f-company', 'Contractor (assigned)', F.company, [['all', 'All contractors'], ['none', 'Unassigned']].concat(S.companies.map(function (c) { return [String(c.id), c.name + (c.is_active ? '' : ' (inactive)')]; })), 'company')),
+      h('p', { class: 'hint filters-note', text: 'The totals below follow the Block, Activity and Contractor filters. The Status filter narrows the section list.' })));
 
     // KPIs
-    var counts = {};
+    var counts = {}, tot = { ongoing: 0, on_hold: 0, completed: 0 };
     acts.forEach(function (a) {
-      counts[a] = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 };
-      inScope.forEach(function (t) { counts[a][statusOf(t.id, a)]++; });
+      counts[a] = statusCounts(inScope, a);
+      tot.ongoing += counts[a].ongoing; tot.on_hold += counts[a].on_hold; tot.completed += counts[a].completed;
     });
     var nAct = inScope.length * acts.length;
-    var tot = { ongoing: 0, on_hold: 0, completed: 0 };
-    acts.forEach(function (a) { tot.ongoing += counts[a].ongoing; tot.on_hold += counts[a].on_hold; tot.completed += counts[a].completed; });
-    var b1 = (S.byBlock[1] || []).filter(counted).length, b5 = (S.byBlock[5] || []).filter(counted).length;
-    var noid1 = (S.byBlock[1] || []).filter(function (t) { return !t.code; }).length;
-    var noid5 = (S.byBlock[5] || []).filter(function (t) { return !t.code; }).length;
+    var b1 = (S.secByBlock[1] || []).filter(counted).length, b5 = (S.secByBlock[5] || []).filter(counted).length;
+    var nid1 = (S.secByBlock[1] || []).filter(function (s) { return !s.code; }).length;
+    var nid5 = (S.secByBlock[5] || []).filter(function (s) { return !s.code; }).length;
+    var assigned = inScope.filter(function (s) { return asgOf(s.id); }).length;
     function kpi(label, num, note, cls) {
       return h('div', { class: 'kpi' + (cls ? ' ' + cls : '') }, h('div', { class: 'k-label', text: label }), h('div', { class: 'k-num' }, num), note ? h('div', { class: 'k-note', text: note }) : null);
     }
-    var kp = h('div', { class: 'kpis' },
-      kpi('Total tables · Block 1', String(b1), noid1 ? noid1 + ' outline' + (noid1 > 1 ? 's' : '') + ' without ID not counted' : 'All outlines have an ID'),
-      kpi('Total tables · Block 5', String(b5), noid5 ? noid5 + ' outline' + (noid5 > 1 ? 's' : '') + ' without ID not counted' : 'All outlines have an ID'));
-    acts.forEach(function (a) {
-      kp.append(kpi(ACT_SHORT[a] + ' completed', [String(counts[a].completed), h('small', { text: ' / ' + inScope.length })], fmtPct(counts[a].completed, inScope.length) + ' of tables in view', 's-completed'));
-    });
-    kp.append(kpi('Ongoing activities', String(tot.ongoing), 'Tables × activities now in progress', 's-ongoing'));
-    kp.append(kpi('Activities on hold', String(tot.on_hold), 'Tables × activities stopped or waiting', 's-on_hold'));
-    kp.append(kpi('Remaining activities', [String(nAct - tot.completed), h('small', { text: ' / ' + nAct })], 'Not yet completed (' + acts.length + ' activit' + (acts.length > 1 ? 'ies' : 'y') + ' × ' + inScope.length + ' tables)', 's-not_started'));
     var today = new Date().toDateString(), todayN = 0;
-    inScope.forEach(function (t) { acts.forEach(function (a) { var u = curOf(t.id, a); if (u && new Date(u.created_at).toDateString() === today) todayN++; }); });
-    kp.append(kpi('Updated today', String(todayN), 'Tables × activities with a status saved today'));
-    if (kp.children.length % 2) kp.lastChild.classList.add('span2');
+    inScope.forEach(function (s) { acts.forEach(function (a) { var u = curOf(s.id, a); if (u && new Date(u.created_at).toDateString() === today) todayN++; }); });
+    var kp = h('div', { class: 'kpis' },
+      kpi('Sections · Block 1', String(b1), nid1 ? nid1 + ' more outline' + (nid1 > 1 ? 's' : '') + ' without ID not counted' : 'All outlines have an ID'),
+      kpi('Sections · Block 5', String(b5), nid5 ? nid5 + ' more outline' + (nid5 > 1 ? 's' : '') + ' without ID not counted' : 'All outlines have an ID'),
+      kpi(F.company === 'all' ? 'Assigned to a contractor' : 'Sections in this filter', [String(F.company === 'all' ? assigned : inScope.length), h('small', { text: ' / ' + (F.company === 'all' ? inScope.length : (blocks.length === 2 ? b1 + b5 : (blocks[0] === 1 ? b1 : b5))) })], F.company === 'all' ? fmtPct(assigned, inScope.length) + ' of sections in view' : 'Sections assigned to the chosen contractor'),
+      kpi('Unassigned', String(inScope.length - assigned), 'Sections with no contractor yet'));
+    acts.forEach(function (a) {
+      kp.append(kpi(ACT_SHORT[a] + ' completed', [String(counts[a].completed), h('small', { text: ' / ' + inScope.length })], fmtPct(counts[a].completed, inScope.length) + ' of sections in view', 's-completed'));
+    });
+    kp.append(kpi('Ongoing activities', String(tot.ongoing), 'Sections × activities in progress', 's-ongoing'));
+    kp.append(kpi('Activities on hold', String(tot.on_hold), 'Sections × activities stopped or waiting', 's-on_hold'));
+    kp.append(kpi('Remaining activities', [String(nAct - tot.completed), h('small', { text: ' / ' + nAct })], 'Not yet completed (' + acts.length + ' activit' + (acts.length > 1 ? 'ies' : 'y') + ' × ' + inScope.length + ' sections)', 's-not_started'));
+    kp.append(kpi('Updated today', String(todayN), 'Sections × activities with a status saved today'));
+    var n = kp.children.length;
+    if (n % 4 === 2) { kp.children[n - 1].classList.add('span2'); kp.children[n - 2].classList.add('span2'); }
+    else if (n % 4 === 3) kp.children[n - 1].classList.add('span2');
+    else if (n % 4 === 1) { kp.children[n - 1].classList.add('span2'); kp.children[n - 2].classList.add('span2'); kp.children[n - 3].classList.add('span2'); }
     root.append(kp);
 
-    // progress bars per block and activity
+    // progress
     var prog = h('div', { class: 'prog' });
     blocks.forEach(function (b) {
-      var list = (S.byBlock[b] || []).filter(counted);
+      var list = (S.secByBlock[b] || []).filter(counted);
       acts.forEach(function (a) {
-        var c = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 };
-        list.forEach(function (t) { c[statusOf(t.id, a)]++; });
+        var c = statusCounts(list, a);
         prog.append(h('div', { class: 'prog-row' },
           h('div', { class: 'p-label', text: 'Block ' + b + ' · ' + ACT_SHORT[a] }), statusBar(c, list.length),
           h('div', { class: 'p-nums' }, ST.map(function (s) { return h('span', { text: ST_LABEL[s] + ': ' + c[s] }); }),
@@ -1054,80 +1379,82 @@
         h('div', { class: 'legend-inline' }, ST.map(function (s) { return h('span', null, h('i', { class: 'sw s-' + s }), ST_LABEL[s]); })),
         prog)));
 
-    // responsibility by company
+    // contractors
     var byCo = new Map();
-    inScope.forEach(function (t) {
-      acts.forEach(function (a) {
-        var u = curOf(t.id, a); if (!u) return;
-        var row = byCo.get(u.company_id) || { name: u.company_name, c: {} };
-        var key = a + '|' + u.status; row.c[key] = (row.c[key] || 0) + 1; byCo.set(u.company_id, row);
-      });
+    inScope.forEach(function (s) {
+      var a = asgOf(s.id), key = a ? a.company_id : 0;
+      var row = byCo.get(key) || { n: 0, c: {} };
+      row.n++;
+      acts.forEach(function (act) { var k = act + '|' + statusOf(s.id, act); row.c[k] = (row.c[k] || 0) + 1; });
+      byCo.set(key, row);
     });
-    var coRows = Array.from(byCo.entries()).sort(function (x, y) { return x[1].name.localeCompare(y[1].name); });
-    var coHead1 = h('tr', null, h('th', { rowspan: 2, text: 'Company' }));
+    var coKeys = Array.from(byCo.keys()).sort(function (x, y) { return x === 0 ? 1 : y === 0 ? -1 : companyName(x).localeCompare(companyName(y)); });
+    var coHead1 = h('tr', null, h('th', { rowspan: 2, text: 'Contractor' }), h('th', { rowspan: 2, class: 'num', text: 'Sections' }));
     var coHead2 = h('tr');
     acts.forEach(function (a) {
-      coHead1.append(h('th', { colspan: 3, class: 'grp', text: ACT_SHORT[a] }));
+      coHead1.append(h('th', { colspan: 4, class: 'grp', text: ACT_SHORT[a] }));
       ['completed', 'ongoing', 'on_hold'].forEach(function (s) { coHead2.append(h('th', { class: 'num', text: ST_LABEL[s] })); });
+      coHead2.append(h('th', { class: 'num', text: '% done' }));
     });
     var coBody = h('tbody');
-    coRows.forEach(function (e) {
-      var tr = h('tr', null, h('td', null, h('strong', { text: e[1].name })));
-      acts.forEach(function (a) { ['completed', 'ongoing', 'on_hold'].forEach(function (s) { tr.append(h('td', { class: 'num', text: String(e[1].c[a + '|' + s] || 0) })); }); });
-      if (F.company !== 'all' && String(e[0]) !== F.company) tr.className = 'muted';
+    coKeys.forEach(function (k) {
+      var r = byCo.get(k);
+      var tr = h('tr', null, h('td', null, cchip(k || null)), h('td', { class: 'num', text: String(r.n) }));
+      acts.forEach(function (a) {
+        ['completed', 'ongoing', 'on_hold'].forEach(function (s) { tr.append(h('td', { class: 'num', text: String(r.c[a + '|' + s] || 0) })); });
+        tr.append(h('td', { class: 'num', text: fmtPct(r.c[a + '|completed'] || 0, r.n) }));
+      });
+      if (F.company !== 'all' && String(k || 'none') !== F.company) tr.className = 'muted';
       coBody.append(tr);
     });
-    root.append(h('div', { class: 'card' }, h('h2', { text: 'Responsible companies' }),
-      h('p', { class: 'card-sub', text: 'Company named in the latest update of each table and activity.' }),
-      coRows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'dtable co-table' }, h('thead', null, coHead1, coHead2), coBody))
-        : h('div', { class: 'empty-state', text: 'No updates have been saved yet.' })));
+    root.append(h('div', { class: 'card' }, h('h2', { text: 'Contractors' }),
+      h('p', { class: 'card-sub', text: 'Sections assigned to each contractor and their installation status. Colours match the Contractors view of the keyplan.' }),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'dtable co-table' }, h('thead', null, coHead1, coHead2), coBody))));
 
     // filtered list
     var rows = [];
-    inScope.forEach(function (t) {
-      acts.forEach(function (a) {
-        var u = curOf(t.id, a), st = u ? u.status : 'not_started';
+    inScope.forEach(function (s) {
+      var a = asgOf(s.id);
+      if (F.company === 'none' && a) return;
+      if (F.company !== 'all' && F.company !== 'none' && (!a || String(a.company_id) !== F.company)) return;
+      acts.forEach(function (act) {
+        var u = curOf(s.id, act), st = u ? u.status : 'not_started';
         if (F.status !== 'all' && st !== F.status) return;
-        if (F.company !== 'all' && (!u || String(u.company_id) !== F.company)) return;
-        rows.push({ t: t, a: a, u: u, st: st });
+        rows.push({ s: s, a: act, u: u, st: st, asg: a });
       });
     });
-    rows.sort(function (x, y) { return x.t.block - y.t.block || cmpCode(x.t.code, y.t.code) || ACTS.indexOf(x.a) - ACTS.indexOf(y.a); });
+    rows.sort(function (x, y) { return cmpSec(x.s, y.s) || ACTS.indexOf(x.a) - ACTS.indexOf(y.a); });
     var per = 50, pages = Math.max(1, Math.ceil(rows.length / per));
     if (F.page >= pages) F.page = pages - 1;
-    var slice = rows.slice(F.page * per, F.page * per + per);
     var body = h('tbody');
-    slice.forEach(function (r) {
+    rows.slice(F.page * per, F.page * per + per).forEach(function (r) {
       body.append(h('tr', null,
-        h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: r.t.code, title: 'Show on keyplan', onclick: function () { locate(r.t, r.a); } })),
-        h('td', { class: 'nowrap', text: 'Block ' + r.t.block }),
+        h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: r.s.code, title: 'Show on keyplan', onclick: function () { locate(r.s, r.a); } })),
+        h('td', { class: 'nowrap', text: 'Block ' + r.s.block }),
+        h('td', null, cchip(r.asg && r.asg.company_id)),
         h('td', { class: 'nowrap', text: ACT_SHORT[r.a] }),
         h('td', null, chip(r.st)),
-        h('td', { text: r.u ? r.u.company_name : '—' }),
         h('td', { class: 'nowrap', text: r.u ? r.u.username : '—' }),
         h('td', { class: 'nowrap', text: r.u ? fmtTime(r.u.created_at) : '—' }),
         h('td', { text: r.u && r.u.remarks ? r.u.remarks : '' })));
     });
-    var listCard = h('div', { class: 'card' }, h('h2', { text: 'Tables matching the filters' }),
-      h('p', { class: 'card-sub', text: rows.length + ' table-activit' + (rows.length === 1 ? 'y' : 'ies') + '. Select a table ID to show it on the keyplan.' }));
+    var listCard = h('div', { class: 'card' }, h('h2', { text: 'Sections matching the filters' }),
+      h('p', { class: 'card-sub', text: rows.length + ' section-activit' + (rows.length === 1 ? 'y' : 'ies') + '. Select a section ID to show it on the keyplan.' }));
     if (rows.length) {
       listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-        h('thead', null, h('tr', null, ['Table ID', 'Block', 'Activity', 'Status', 'Company', 'Updated by', 'Date & time', 'Remarks'].map(function (x) { return h('th', { text: x }); }))),
+        h('thead', null, h('tr', null, ['Section ID', 'Block', 'Contractor', 'Activity', 'Status', 'Updated by', 'Date & time', 'Remarks'].map(function (x) { return h('th', { text: x }); }))),
         body)));
-      if (pages > 1) {
-        listCard.append(h('div', { class: 'pager' },
-          h('span', { text: 'Page ' + (F.page + 1) + ' of ' + pages }),
-          h('div', { class: 'btn-row' },
-            h('button', { type: 'button', class: 'btn small', text: '← Previous', disabled: F.page === 0, onclick: function () { F.page--; renderDashboard(); } }),
-            h('button', { type: 'button', class: 'btn small', text: 'Next →', disabled: F.page >= pages - 1, onclick: function () { F.page++; renderDashboard(); } }))));
-      }
-    } else listCard.append(h('div', { class: 'empty-state', text: 'No tables match these filters.' }));
+      if (pages > 1) listCard.append(h('div', { class: 'pager' },
+        h('span', { text: 'Page ' + (F.page + 1) + ' of ' + pages }),
+        h('div', { class: 'btn-row' },
+          h('button', { type: 'button', class: 'btn small', text: '← Previous', disabled: F.page === 0, onclick: function () { F.page--; renderDashboard(); } }),
+          h('button', { type: 'button', class: 'btn small', text: 'Next →', disabled: F.page >= pages - 1, onclick: function () { F.page++; renderDashboard(); } }))));
+    } else listCard.append(h('div', { class: 'empty-state', text: 'No sections match these filters.' }));
     root.append(listCard);
 
-    // recent updates log
-    var logCard = h('div', { class: 'card' }, h('h2', { text: 'Latest saved updates' }),
-      h('p', { class: 'card-sub', text: 'Every change is kept. Newest first, using the same filters.' }), h('div', { id: 'dash-log' }, h('p', { class: 'small muted', text: 'Loading…' })));
-    root.append(logCard);
+    root.append(h('div', { class: 'card' }, h('h2', { text: 'Latest saved updates' }),
+      h('p', { class: 'card-sub', text: 'Every change is kept. Newest first. Uses the block, activity and status filters.' }),
+      h('div', { id: 'dash-log' }, h('p', { class: 'small muted', text: 'Loading…' }))));
     loadLog();
     root.parentElement.scrollTop = scrollY;
   }
@@ -1135,17 +1462,16 @@
     var F = S.dash;
     call('get_updates', {
       p_block: F.block === 'all' ? null : +F.block, p_activity: F.act === 'all' ? null : F.act,
-      p_status: F.status === 'all' ? null : F.status, p_company_id: F.company === 'all' ? null : +F.company,
-      p_limit: 30, p_before_id: null
+      p_status: F.status === 'all' ? null : F.status, p_company_id: null, p_limit: 30, p_before_id: null
     }).then(function (d) {
       var box = $('#dash-log'); if (!box) return;
       box.textContent = '';
       if (!d.updates.length) { box.append(h('div', { class: 'empty-state', text: 'No saved updates yet.' })); return; }
       box.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-        h('thead', null, h('tr', null, ['Date & time', 'Table ID', 'Activity', 'Status', 'Company', 'Saved by', 'Remarks'].map(function (x) { return h('th', { text: x }); }))),
+        h('thead', null, h('tr', null, ['Date & time', 'Section ID', 'Activity', 'Status', 'Company', 'Saved by', 'Remarks'].map(function (x) { return h('th', { text: x }); }))),
         h('tbody', null, d.updates.map(function (u) {
           return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(u.created_at) }),
-            h('td', null, h('span', { class: 'tid', text: u.table_code })), h('td', { class: 'nowrap', text: ACT_SHORT[u.activity] }),
+            h('td', null, h('span', { class: 'tid', text: u.section_code })), h('td', { class: 'nowrap', text: ACT_SHORT[u.activity] }),
             h('td', null, chip(u.status)), h('td', { text: u.company_name }), h('td', { class: 'nowrap', text: u.username }),
             h('td', { text: u.remarks || '' }));
         })))));
@@ -1153,11 +1479,11 @@
       var box = $('#dash-log'); if (box) box.textContent = 'Could not load updates: ' + e.message;
     });
   }
-  function locate(t, a) {
-    setView('keyplan');
-    if (a && a !== S.act) setAct(a);
-    if (t.block !== S.block) setBlock(t.block);
-    selectTable(t.id, { zoom: true });
+  function locate(s, act, disp) {
+    setPage('keyplan');
+    if (disp) setDisp(disp); else if (act && act !== S.disp && S.disp !== 'assign') setDisp(act);
+    if (s.block !== S.block) setBlock(s.block);
+    selectSection(s.id, { zoom: true });
   }
 
   // ----- CSV exports -----
@@ -1174,17 +1500,25 @@
     setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
   }
   function stamp() { var d = new Date(); return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+  function sortedSections() {
+    var list = [];
+    BLOCKS.forEach(function (b) {
+      list = list.concat((S.secByBlock[b] || []).slice().sort(cmpSec));
+    });
+    return list;
+  }
   function exportCurrent() {
-    var rows = [['Block', 'Table ID', 'In monitoring', 'Drawing note',
+    var rows = [['Block', 'Section ID', 'Parent table ID', 'Side', 'In monitoring', 'Drawing note', 'Contractor', 'Area',
       'Mounting Structure status', 'Mounting Structure company', 'Mounting Structure updated by', 'Mounting Structure updated at', 'Mounting Structure remarks',
       'PV Module status', 'PV Module company', 'PV Module updated by', 'PV Module updated at', 'PV Module remarks']];
-    var list = [];
-    BLOCKS.forEach(function (b) { list = list.concat((S.byBlock[b] || []).slice().sort(function (x, y) { return cmpCode(x.code, y.code); })); });
-    list.forEach(function (t) {
-      var r = [t.block, t.code || '(no ID in drawing)', counted(t) ? 'Yes' : 'No', (t.flags || []).map(function (f) { return FLAG_LABEL[f] || f; }).join('; ')];
-      ACTS.forEach(function (a) {
-        var u = curOf(t.id, a);
-        r.push(counted(t) ? ST_LABEL[u ? u.status : 'not_started'] : '', u ? u.company_name : '', u ? u.username : '', u ? fmtTime(u.created_at) : '', u && u.remarks ? u.remarks : '');
+    sortedSections().forEach(function (s) {
+      var p = parentOf(s), a = asgOf(s.id);
+      var flags = (p.flags || []).concat(s.flags || []).map(function (f) { return FLAG_LABEL[f] || f; }).join('; ');
+      var r = [s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?', counted(s) ? 'Yes' : 'No', flags,
+        a ? companyName(a.company_id) : 'Unassigned', a ? a.area : ''];
+      ACTS.forEach(function (act) {
+        var u = curOf(s.id, act);
+        r.push(counted(s) ? ST_LABEL[u ? u.status : 'not_started'] : '', u ? u.company_name : '', u ? u.username : '', u ? fmtTime(u.created_at) : '', u && u.remarks ? u.remarks : '');
       });
       rows.push(r);
     });
@@ -1194,14 +1528,23 @@
     var btn = e && e.target; if (btn) { btn.disabled = true; btn.textContent = 'Preparing…'; }
     call('get_updates', { p_block: null, p_activity: null, p_status: null, p_company_id: null, p_limit: 20000, p_before_id: null })
       .then(function (d) {
-        var rows = [['Update no.', 'Date & time', 'Date & time (UTC, ISO)', 'Block', 'Table ID', 'Activity', 'Status', 'Company', 'Username', 'Name', 'Remarks']];
+        var rows = [['Update no.', 'Date & time', 'Date & time (UTC, ISO)', 'Block', 'Section ID', 'Parent table ID', 'Activity', 'Status', 'Company', 'Username', 'Name', 'Remarks']];
         d.updates.slice().reverse().forEach(function (u) {
-          rows.push([u.id, fmtTime(u.created_at), new Date(u.created_at).toISOString(), u.block, u.table_code, ACT[u.activity], ST_LABEL[u.status], u.company_name, u.username, u.full_name || '', u.remarks || '']);
+          rows.push([u.id, fmtTime(u.created_at), new Date(u.created_at).toISOString(), u.block, u.section_code, u.table_code || '', ACT[u.activity], ST_LABEL[u.status], u.company_name, u.username, u.full_name || '', u.remarks || '']);
         });
         download('pv-installation-history-' + stamp() + '.csv', rows);
       })
       .catch(function (err) { toast('Download failed. ' + err.message, 'err'); })
       .then(function () { if (btn) { btn.disabled = false; btn.textContent = 'Download full history (CSV)'; } });
+  }
+  function exportAssignments() {
+    var rows = [['Block', 'Section ID', 'Parent table ID', 'Side', 'Contractor', 'Area', 'Assigned by', 'Assigned at']];
+    sortedSections().forEach(function (s) {
+      var a = asgOf(s.id), p = parentOf(s);
+      rows.push([s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?',
+        a ? companyName(a.company_id) : 'Unassigned', a ? a.area : '', a ? a.assigned_by_name : '', a ? fmtTime(a.assigned_at) : '']);
+    });
+    download('pv-contractor-assignments-' + stamp() + '.csv', rows);
   }
 
   // ------------------------------------------------------------------
@@ -1209,19 +1552,22 @@
   // ------------------------------------------------------------------
   function renderAdmin(refetch) {
     var root = $('#admin'); if (!root || !isAdmin()) return;
+    var scrollY = root.parentElement.scrollTop;
     root.textContent = '';
     var A = S.admin;
     root.append(h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Administration' }),
-      h('p', { text: 'Accounts, contractor names and table information. Only administrators see this page.' }))));
+      h('p', { text: 'Accounts, contractors, assignments and drawing review. Only administrators see this page.' }))));
     root.append(h('div', { class: 'subtabs', role: 'group', 'aria-label': 'Administration sections' },
-      [['accounts', 'Accounts'], ['companies', 'Companies'], ['review', 'Table review']].map(function (x) {
-        return h('button', { type: 'button', 'aria-pressed': String(A.tab === x[0]), text: x[1], onclick: function () { A.tab = x[0]; renderAdmin(x[0] === 'accounts'); } });
+      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['review', 'Drawing review']].map(function (x) {
+        return h('button', { type: 'button', 'aria-pressed': String(A.tab === x[0]), text: x[1], onclick: function () { A.tab = x[0]; renderAdmin(true); } });
       })));
     var body = h('div', { class: 'stack', id: 'admin-body' });
     root.append(body);
     if (A.tab === 'accounts') renderAccounts(body, refetch || !A.users);
     else if (A.tab === 'companies') renderCompanies(body);
+    else if (A.tab === 'assignments') renderAssignments(body, refetch || !A.log);
     else renderReview(body);
+    if (!refetch) root.parentElement.scrollTop = scrollY;
   }
 
   function roleOptions(selected) {
@@ -1246,7 +1592,7 @@
     var btn = h('button', { type: 'submit', class: 'btn primary', text: 'Create account' });
     var form = h('form', { class: 'card', novalidate: true },
       h('h2', { text: 'Add an account' }),
-      h('p', { class: 'card-sub', text: 'Subcontractors can update tables. Viewers can only look. Administrators manage everything.' }),
+      h('p', { class: 'card-sub', text: 'Subcontractors update the sections assigned to their company. Viewers can only look. Administrators manage everything.' }),
       !S.companies.length ? h('div', { class: 'notice warn', text: 'Add the contractor and subcontractor companies first (Companies tab). Subcontractor accounts need a company.' }) : null,
       h('div', { class: 'grid-form' },
         h('div', { class: 'field' }, h('label', { for: 'a-user', text: 'Username' }), fUser),
@@ -1273,12 +1619,11 @@
       });
     });
     body.append(form);
-
     var listCard = h('div', { class: 'card' }, h('h2', { text: 'Accounts' }));
     body.append(listCard);
     if (refetch || !A.users) {
       listCard.append(h('p', { class: 'small muted', text: 'Loading accounts…' }));
-      call('admin_list_users').then(function (d) { A.users = d.users; if (S.view === 'admin' && A.tab === 'accounts') renderAdmin(false); })
+      call('admin_list_users').then(function (d) { A.users = d.users; if (S.page === 'admin' && A.tab === 'accounts') renderAdmin(false); })
         .catch(function (e) { listCard.append(h('p', { class: 'form-error', text: e.message })); });
       return;
     }
@@ -1291,7 +1636,8 @@
               : h('span', { class: 'pill on', text: 'Active' });
         return h('tr', null,
           h('td', null, h('strong', { class: 'mono', text: u.username })), h('td', { text: u.full_name || '—' }),
-          h('td', { class: 'nowrap', text: ROLE_LABEL[u.role] }), h('td', { text: u.company_name || '—' }), h('td', null, st),
+          h('td', { class: 'nowrap' }, ROLE_LABEL[u.role], u.can_assign ? h('div', { class: 'small muted', text: '+ can assign' }) : null),
+          h('td', null, u.company_id ? cchip(u.company_id) : '—'), h('td', null, st),
           h('td', { class: 'nowrap', text: u.last_login_at ? fmtTime(u.last_login_at) : 'Never' }),
           h('td', { class: 'nowrap' }, h('div', { class: 'btn-row nowrap' },
             h('button', { type: 'button', class: 'btn small', text: 'Edit', onclick: function () { editUser(u); } }),
@@ -1315,11 +1661,15 @@
     var fRole = h('select', { id: 'e-role' }, roleOptions(u.role));
     var fCo = h('select', { id: 'e-company' }, companyOptions(u.company_id, true));
     var fAct = h('input', { id: 'e-active', type: 'checkbox', checked: u.is_active });
+    var fAsg = h('input', { id: 'e-assign', type: 'checkbox', checked: !!u.can_assign });
+    var asgRow = h('label', { class: 'check' }, fAsg, h('span', { text: 'Allow this subcontractor to assign and reassign contractors' }));
+    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; }
+    fRole.addEventListener('change', syncRole); syncRole();
     var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
     var save = h('button', { type: 'button', class: 'btn primary', text: 'Save changes' });
     save.addEventListener('click', function () {
       save.disabled = true; err.hidden = true;
-      call('admin_update_user', { p_user_id: u.id, p_full_name: fName.value.trim(), p_role: fRole.value, p_company_id: fCo.value ? +fCo.value : null, p_is_active: fAct.checked })
+      call('admin_update_user', { p_user_id: u.id, p_full_name: fName.value.trim(), p_role: fRole.value, p_company_id: fCo.value ? +fCo.value : null, p_is_active: fAct.checked, p_can_assign: fRole.value === 'subcontractor' && fAsg.checked })
         .then(function () { closeModal(); toast('Account ' + u.username + ' updated.', 'ok'); S.admin.users = null; renderAdmin(true); })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
@@ -1327,6 +1677,7 @@
       h('div', { class: 'field' }, h('label', { for: 'e-name', text: 'Full name' }), fName),
       h('div', { class: 'field' }, h('label', { for: 'e-role', text: 'Role' }), fRole),
       h('div', { class: 'field' }, h('label', { for: 'e-company', text: 'Company' }), fCo),
+      asgRow,
       h('label', { class: 'check' }, fAct, h('span', { text: 'Account active (untick to block sign-in; this also signs the user out)' })),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
@@ -1356,79 +1707,196 @@
     var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
     var btn = h('button', { type: 'submit', class: 'btn primary', text: 'Add company' });
     var form = h('form', { class: 'card', novalidate: true }, h('h2', { text: 'Add a contractor or subcontractor' }),
-      h('p', { class: 'card-sub', text: 'These names appear in the company list when a status is saved.' }),
+      h('p', { class: 'card-sub', text: 'Each company gets its own colour for the Contractors view. You can change it with Edit.' }),
       h('div', { class: 'grid-form' }, h('div', { class: 'field' }, h('label', { for: 'c-name', text: 'Company name' }), fName), h('div', null, btn)), err);
     form.addEventListener('submit', function (e) {
       e.preventDefault(); err.hidden = true; btn.disabled = true;
-      call('admin_save_company', { p_company_id: null, p_name: fName.value, p_is_active: true })
+      call('admin_save_company', { p_company_id: null, p_name: fName.value, p_is_active: true, p_color: null })
         .then(function () { toast('Company added.', 'ok'); return loadBootstrap(); })
         .then(function () { renderAdmin(); })
         .catch(function (e2) { err.textContent = e2.message; err.hidden = false; btn.disabled = false; });
     });
     body.append(form);
     var use = new Map();
-    S.cur.forEach(function (u) { use.set(u.company_id, (use.get(u.company_id) || 0) + 1); });
+    S.assign.forEach(function (a) { use.set(a.company_id, (use.get(a.company_id) || 0) + 1); });
     var card = h('div', { class: 'card' }, h('h2', { text: 'Companies' }));
     if (!S.companies.length) card.append(h('div', { class: 'empty-state', text: 'No companies yet. Add the first one above.' }));
     else card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-      h('thead', null, h('tr', null, ['Company', 'Status', 'Current responsibilities', ''].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['Company', 'Status', 'Assigned sections', ''].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, S.companies.map(function (c) {
-        return h('tr', null, h('td', null, h('strong', { text: c.name })),
+        return h('tr', null, h('td', null, cchip(c.id)),
           h('td', null, h('span', { class: 'pill ' + (c.is_active ? 'on' : 'off'), text: c.is_active ? 'Active' : 'Inactive' })),
           h('td', { class: 'num', text: String(use.get(c.id) || 0) }),
           h('td', { class: 'nowrap' }, h('div', { class: 'btn-row nowrap' },
-            h('button', { type: 'button', class: 'btn small', text: 'Rename', onclick: function () { renameCompany(c); } }),
+            h('button', { type: 'button', class: 'btn small', text: 'Edit', onclick: function () { editCompany(c); } }),
             h('button', {
               type: 'button', class: 'btn small' + (c.is_active ? ' danger' : ''), text: c.is_active ? 'Deactivate' : 'Activate',
-              onclick: function () { saveCompany(c, c.name, !c.is_active); }
+              onclick: function () { saveCompany(c, c.name, !c.is_active, c.color); }
             }))));
       })))));
-    card.append(h('p', { class: 'hint', text: 'Deactivated companies disappear from the list for new updates. Their past records stay unchanged.' }));
+    card.append(h('p', { class: 'hint', text: 'A company with assigned sections cannot be deactivated until they are reassigned. Past records stay unchanged.' }));
     body.append(card);
   }
-  function saveCompany(c, name, active) {
-    return call('admin_save_company', { p_company_id: c.id, p_name: name, p_is_active: active })
+  function saveCompany(c, name, active, color) {
+    return call('admin_save_company', { p_company_id: c.id, p_name: name, p_is_active: active, p_color: color })
       .then(function () { toast('Company saved.', 'ok'); return loadBootstrap(); })
       .then(function () { closeModal(); renderAdmin(); })
-      .catch(function (e) { toast(e.message, 'err'); throw e; });
+      .catch(function (e) { toast(e.message, 'err', 8000); throw e; });
   }
-  function renameCompany(c) {
+  function editCompany(c) {
     var f = h('input', { id: 'rc-name', maxlength: 120 }); f.value = c.name;
-    var save = h('button', { type: 'button', class: 'btn primary', text: 'Save name' });
-    save.addEventListener('click', function () { save.disabled = true; saveCompany(c, f.value, c.is_active).catch(function () { save.disabled = false; }); });
-    openModal('Rename company', [h('div', { class: 'field' }, h('label', { for: 'rc-name', text: 'Company name' }), f),
-      h('p', { class: 'hint', text: 'The new name is shown everywhere, including earlier updates by this company.' }),
+    var chosen = c.color;
+    var pal = h('div', { class: 'palette', role: 'group', 'aria-label': 'Colour' });
+    function drawPal() {
+      pal.textContent = '';
+      PALETTE.forEach(function (col) {
+        var used = S.companies.filter(function (x) { return x.id !== c.id && x.is_active && (x.color || '').toLowerCase() === col; }).map(function (x) { return x.name; });
+        pal.append(h('button', { type: 'button', color: col, 'aria-pressed': String((chosen || '').toLowerCase() === col), 'aria-label': col + (used.length ? ' (used by ' + used.join(', ') + ')' : ''), title: used.length ? 'Also used by ' + used.join(', ') : 'Not used yet', onclick: function () { chosen = col; drawPal(); } }));
+      });
+    }
+    drawPal();
+    var save = h('button', { type: 'button', class: 'btn primary', text: 'Save' });
+    save.addEventListener('click', function () { save.disabled = true; saveCompany(c, f.value, c.is_active, chosen).catch(function () { save.disabled = false; }); });
+    openModal('Edit company', [h('div', { class: 'field' }, h('label', { for: 'rc-name', text: 'Company name' }), f),
+      h('div', { class: 'field' }, h('span', { class: 'label', text: 'Colour on the keyplan (Contractors view)' }), pal,
+        h('p', { class: 'hint', text: 'Pick a colour no other active company uses, so each contractor stays easy to tell apart.' })),
+      h('p', { class: 'hint', text: 'A new name is shown everywhere, including earlier records by this company.' }),
       h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+
+  function renderAssignments(body, refetch) {
+    var A = S.admin, F = A.afilter;
+    var all = allSections();
+    var summary = new Map(), un = { 1: 0, 5: 0 };
+    all.forEach(function (s) {
+      var a = asgOf(s.id);
+      if (!a) { un[s.block]++; return; }
+      var r = summary.get(a.company_id) || { b1: 0, b5: 0, areas: new Set() };
+      r['b' + s.block]++; if (a.area) r.areas.add(a.area);
+      summary.set(a.company_id, r);
+    });
+    var sumBody = h('tbody');
+    Array.from(summary.keys()).sort(function (x, y) { return companyName(x).localeCompare(companyName(y)); }).forEach(function (cid) {
+      var r = summary.get(cid);
+      sumBody.append(h('tr', null, h('td', null, cchip(cid)), h('td', { class: 'num', text: String(r.b1) }), h('td', { class: 'num', text: String(r.b5) }),
+        h('td', { class: 'small', text: Array.from(r.areas).sort().join(', ') || '—' }),
+        h('td', { class: 'nowrap' }, h('button', { type: 'button', class: 'btn small', text: 'Show on keyplan', onclick: function () { showCompanyOnKeyplan(cid); } }))));
+    });
+    sumBody.append(h('tr', null, h('td', null, cchip(null)), h('td', { class: 'num', text: String(un[1]) }), h('td', { class: 'num', text: String(un[5]) }), h('td', { text: '' }), h('td', { text: '' })));
+    body.append(h('div', { class: 'card' }, h('h2', { text: 'Assignments by contractor' }),
+      h('p', { class: 'card-sub', text: 'To assign: open the keyplan, choose the Contractors view, then select sections by tapping or drawing an area.' }),
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn primary small', text: 'Open the Contractors view', onclick: function () { S.highlight = null; setPage('keyplan'); setDisp('assign'); setPick('area'); } }),
+        h('button', { type: 'button', class: 'btn small', text: 'Download assignments (CSV)', onclick: exportAssignments })),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+        h('thead', null, h('tr', null, ['Contractor', 'Block 1', 'Block 5', 'Areas', ''].map(function (x, i) { return h('th', { class: i === 1 || i === 2 ? 'num' : null, text: x }); }))), sumBody))));
+
+    // list with filters
+    var areas = new Set(); S.assign.forEach(function (a) { if (a.area) areas.add(a.area); });
+    function fsel(id, label, val, opts, key) {
+      return h('div', { class: 'field' }, h('label', { for: id, text: label }),
+        h('select', { id: id, onchange: function (e) { F[key] = e.target.value; F.page = 0; renderAdmin(); } },
+          opts.map(function (o) { return h('option', { value: o[0], text: o[1], selected: String(val) === String(o[0]) }); })));
+    }
+    var rows = all.filter(function (s) {
+      var a = asgOf(s.id);
+      if (F.block !== 'all' && String(s.block) !== F.block) return false;
+      if (F.company === 'none') { if (a) return false; } else if (F.company !== 'all' && (!a || String(a.company_id) !== F.company)) return false;
+      if (F.area !== 'all' && (!a || a.area !== F.area)) return false;
+      return true;
+    }).sort(cmpSec);
+    var per = 50, pages = Math.max(1, Math.ceil(rows.length / per));
+    if (F.page >= pages) F.page = pages - 1;
+    var lb = h('tbody');
+    rows.slice(F.page * per, F.page * per + per).forEach(function (s) {
+      var a = asgOf(s.id);
+      lb.append(h('tr', null,
+        h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: secLabel(s), onclick: function () { locate(s, null, 'assign'); } })),
+        h('td', { class: 'nowrap', text: 'Block ' + s.block }), h('td', null, cchip(a && a.company_id)),
+        h('td', { text: a && a.area ? a.area : '—' }), h('td', { class: 'nowrap', text: a ? a.assigned_by_name : '—' }),
+        h('td', { class: 'nowrap', text: a ? fmtTime(a.assigned_at) : '—' })));
+    });
+    var listCard = h('div', { class: 'card' }, h('h2', { text: 'Sections' }),
+      h('div', { class: 'filters' },
+        fsel('af-block', 'Block', F.block, [['all', 'Both blocks'], ['1', 'Block 1'], ['5', 'Block 5']], 'block'),
+        fsel('af-company', 'Contractor', F.company, [['all', 'All'], ['none', 'Unassigned']].concat(S.companies.map(function (c) { return [String(c.id), c.name]; })), 'company'),
+        fsel('af-area', 'Area', F.area, [['all', 'All areas']].concat(Array.from(areas).sort().map(function (a) { return [a, a]; })), 'area')),
+      h('p', { class: 'small muted list-count', text: rows.length + ' sections' }));
+    if (rows.length) {
+      listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+        h('thead', null, h('tr', null, ['Section ID', 'Block', 'Contractor', 'Area', 'Assigned by', 'Assigned on'].map(function (x) { return h('th', { text: x }); }))), lb)));
+      if (pages > 1) listCard.append(h('div', { class: 'pager' }, h('span', { text: 'Page ' + (F.page + 1) + ' of ' + pages }),
+        h('div', { class: 'btn-row' },
+          h('button', { type: 'button', class: 'btn small', text: '← Previous', disabled: F.page === 0, onclick: function () { F.page--; renderAdmin(); } }),
+          h('button', { type: 'button', class: 'btn small', text: 'Next →', disabled: F.page >= pages - 1, onclick: function () { F.page++; renderAdmin(); } }))));
+    }
+    body.append(listCard);
+
+    var logCard = h('div', { class: 'card' }, h('h2', { text: 'Assignment changes' }),
+      h('p', { class: 'card-sub', text: 'Every assignment, reassignment and unassignment, with the previous contractor, the administrator and the date. Newest first.' }));
+    body.append(logCard);
+    if (refetch || !A.log) {
+      logCard.append(h('p', { class: 'small muted', text: 'Loading…' }));
+      call('get_assignment_log', { p_limit: 100 }).then(function (d) { A.log = d.batches; if (S.page === 'admin' && A.tab === 'assignments') renderAdmin(false); })
+        .catch(function (e) { logCard.append(h('p', { class: 'form-error', text: e.message })); });
+      return;
+    }
+    if (!A.log.length) { logCard.append(h('div', { class: 'empty-state', text: 'No assignments made yet.' })); return; }
+    logCard.append(h('ul', { class: 'asg-log' }, A.log.map(function (b) {
+      var prev = Object.keys(b.prev || {}).map(function (k) { return k + ': ' + b.prev[k]; }).join(' · ');
+      return h('li', null,
+        h('div', { class: 'sibling' }, h('strong', { text: fmtTime(b.at) }), h('span', { text: '· by ' + b.username })),
+        h('div', { class: 'sibling' }, h('span', { text: (b.new_company_id ? 'Assigned ' : 'Unassigned ') + plural(b.count, 'section') + (b.new_company_id ? ' to' : '') }),
+          b.new_company_id ? cchip(b.new_company_id) : null, b.new_area ? h('span', { class: 'small', text: '· area: ' + b.new_area }) : null),
+        h('div', { class: 'small muted', text: 'Before: ' + prev }),
+        h('div', { class: 'sel-list', text: (b.codes || []).join(', ') + (b.count > (b.codes || []).length ? ' …' : '') }));
+    })));
+  }
+  function showCompanyOnKeyplan(cid) {
+    var ids = new Set(); var blocks = { 1: 0, 5: 0 };
+    S.assign.forEach(function (a, sid) { if (a.company_id === cid) { ids.add(sid); var s = S.sections.get(sid); if (s) blocks[s.block]++; } });
+    S.highlight = ids;
+    setPage('keyplan'); setDisp('assign');
+    if (blocks[S.block] === 0 && blocks[S.block === 1 ? 5 : 1] > 0) setBlock(S.block === 1 ? 5 : 1); else paintStatuses();
+    toast('Showing ' + companyName(cid) + '. Tap Show all in the panel to clear.', 'ok', 5000);
+    renderPanel();
   }
 
   function renderReview(body) {
     var A = S.admin;
-    var all = [];
-    BLOCKS.forEach(function (b) { all = all.concat(S.byBlock[b] || []); });
-    var flagged = all.filter(function (t) { return (t.flags && t.flags.length) || !t.is_active || t.review_status !== 'none'; });
-    var list = flagged.filter(function (t) { return A.reviewAll || t.review_status === 'open'; });
+    var items = [];
+    S.tables.forEach(function (t) {
+      if ((t.flags && t.flags.length) || !t.is_active || t.review_status !== 'none') items.push({ kind: 'table', t: t });
+    });
+    S.sections.forEach(function (s) {
+      if ((s.flags && s.flags.length) || s.review_status !== 'none') items.push({ kind: 'section', s: s, t: parentOf(s) });
+    });
+    var list = items.filter(function (it) { var x = it.kind === 'table' ? it.t : it.s; return A.reviewAll || x.review_status === 'open'; });
     var toggle = h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: A.reviewAll, onchange: function (e) { A.reviewAll = e.target.checked; renderAdmin(); } }),
       h('span', { text: 'Also show items already marked as checked' }));
     var card = h('div', { class: 'card' }, h('h2', { text: 'Drawing items to review' }),
-      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and checked against both PDF keyplans. Nothing was guessed. Outlines without an ID stay out of all counts until you assign the ID.' }),
+      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and splitting each table into West and East sections. Nothing was guessed: sections without an ID stay out of all counts until you resolve them.' }),
       toggle);
     if (!list.length) card.append(h('div', { class: 'empty-state', text: 'Nothing open for review.' }));
     else card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-      h('thead', null, h('tr', null, ['Block', 'Table ID', 'Issue', 'Details', 'Review', ''].map(function (x) { return h('th', { text: x }); }))),
-      h('tbody', null, list.sort(function (x, y) { return x.block - y.block || cmpCode(x.code || 'zzz', y.code || 'zzz'); }).map(function (t) {
-        return h('tr', null, h('td', { class: 'nowrap', text: 'Block ' + t.block }),
-          h('td', null, h('strong', { class: 'tid', text: t.code || 'NO ID' })),
-          h('td', null, (t.flags || []).map(function (f) { return h('div', { text: FLAG_LABEL[f] || f }); }), !t.is_active ? h('div', { text: 'Excluded from monitoring' }) : null),
-          h('td', { class: 'small', text: [t.flag_notes, t.review_note ? 'Review note: ' + t.review_note : ''].filter(Boolean).join(' ') }),
-          h('td', null, h('span', { class: 'pill ' + (t.review_status === 'resolved' ? 'on' : 'warn'), text: t.review_status === 'resolved' ? 'Checked' : 'Open' })),
+      h('thead', null, h('tr', null, ['Block', 'Table / section', 'Issue', 'Details', 'Review', ''].map(function (x) { return h('th', { text: x }); }))),
+      h('tbody', null, list.sort(function (x, y) { return x.t.block - y.t.block || cmpCode(x.t.code || 'zzz', y.t.code || 'zzz'); }).map(function (it) {
+        var x = it.kind === 'table' ? it.t : it.s;
+        var firstSec = it.kind === 'table' ? S.sections.get(it.t.sections[0]) : it.s;
+        return h('tr', null, h('td', { class: 'nowrap', text: 'Block ' + it.t.block }),
+          h('td', null, h('strong', { class: 'tid', text: it.kind === 'table' ? (it.t.code || 'NO ID') + ' (table)' : secLabel(it.s) + ' (section)' })),
+          h('td', null, (x.flags || []).map(function (f) { return h('div', { text: FLAG_LABEL[f] || f }); }), !x.is_active ? h('div', { text: 'Excluded from monitoring' }) : null),
+          h('td', { class: 'small', text: [x.flag_notes, x.review_note ? 'Review note: ' + x.review_note : ''].filter(Boolean).join(' ') }),
+          h('td', null, h('span', { class: 'pill ' + (x.review_status === 'resolved' ? 'on' : 'warn'), text: x.review_status === 'resolved' ? 'Checked' : x.review_status === 'open' ? 'Open' : 'None' })),
           h('td', { class: 'nowrap' }, h('div', { class: 'btn-row nowrap' },
-            h('button', { type: 'button', class: 'btn small', text: 'Locate', onclick: function () { locate(t); } }),
-            h('button', { type: 'button', class: 'btn small', text: 'Edit', onclick: function () { openTableEditor(t); } }))));
+            firstSec ? h('button', { type: 'button', class: 'btn small', text: 'Locate', onclick: function () { locate(firstSec); } }) : null,
+            h('button', { type: 'button', class: 'btn small', text: 'Edit', onclick: function () { if (it.kind === 'table') openTableEditor(it.t); else openSectionEditor(it.s); } }))));
       })))));
     body.append(card);
   }
 
   function openTableEditor(t) {
+    if (!t) return;
     var fCode = h('input', { id: 't-code', maxlength: 40, autocapitalize: 'characters', spellcheck: 'false', placeholder: 'Leave empty if unknown' }); fCode.value = t.code || '';
     var fRev = h('select', { id: 't-review' },
       h('option', { value: 'none', text: 'No review needed', selected: t.review_status === 'none' }),
@@ -1445,14 +1913,47 @@
         .then(function () { closeModal(); toast('Table info saved.', 'ok'); refreshAll(); })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
-    openModal('Table info · ' + (t.code || 'outline without ID'), [
-      h('p', { class: 'small muted', text: 'Block ' + t.block + (t.dwg_ref ? ' · DWG object handle ' + String(t.dwg_ref).replace(/\+/g, ' + ') : '') }),
-      flagNotice(t),
+    var flagsTxt = (t.flags || []).map(function (f) { return FLAG_LABEL[f] || f; }).join(' · ');
+    openModal('Table info · ' + (t.code || 'table without ID'), [
+      h('p', { class: 'small muted', text: 'Block ' + t.block + ' · DWG object handles ' + String(t.dwg_ref || '').replace(/\+/g, ' + ') }),
+      flagsTxt ? h('div', { class: 'notice warn' }, h('strong', { text: flagsTxt }), t.flag_notes || '') : null,
       h('div', { class: 'field' }, h('label', { for: 't-code', text: 'Table ID (exactly as on the drawing)' }), fCode,
-        h('p', { class: 'hint', text: 'Earlier status records keep the ID they were saved with.' })),
+        h('p', { class: 'hint', text: 'Its sections become this ID + W and this ID + E. Earlier records keep the ID they were saved with.' })),
       h('div', { class: 'field' }, h('label', { for: 't-review', text: 'Review status' }), fRev),
       h('div', { class: 'field' }, h('label', { for: 't-note', text: 'Review note' }), fNote),
-      h('label', { class: 'check' }, fAct, h('span', { text: 'Include this table in monitoring and counts' })),
+      h('label', { class: 'check' }, fAct, h('span', { text: 'Include both sections of this table in monitoring and counts' })),
+      err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+
+  function openSectionEditor(s) {
+    var p = parentOf(s);
+    var fSide = h('select', { id: 's-side' },
+      h('option', { value: '', text: 'Not confirmed (no section ID)', selected: !s.side }),
+      h('option', { value: 'W', text: 'West (W)', selected: s.side === 'W' }),
+      h('option', { value: 'E', text: 'East (E)', selected: s.side === 'E' }));
+    var fRev = h('select', { id: 's-review' },
+      h('option', { value: 'none', text: 'No review needed', selected: s.review_status === 'none' }),
+      h('option', { value: 'open', text: 'Open – needs checking', selected: s.review_status === 'open' }),
+      h('option', { value: 'resolved', text: 'Checked', selected: s.review_status === 'resolved' }));
+    var fNote = h('textarea', { id: 's-note', maxlength: 500 }); fNote.value = s.review_note || '';
+    var fAct = h('input', { id: 's-active', type: 'checkbox', checked: s.is_active });
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', text: 'Save section' });
+    save.addEventListener('click', function () {
+      save.disabled = true; err.hidden = true;
+      call('admin_update_section', { p_section_id: s.id, p_side: fSide.value, p_review_status: fRev.value, p_review_note: fNote.value.trim(), p_is_active: fAct.checked })
+        .then(function () { return loadBootstrap(); })
+        .then(function () { closeModal(); toast('Section saved.', 'ok'); refreshAll(); })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    openModal('Section · ' + secLabel(s), [
+      h('p', { class: 'small muted', text: 'Table ' + (p.code || '(no ID)') + ' · Block ' + s.block + ' · DWG object handle ' + s.dwg_ref }),
+      s.flag_notes ? h('div', { class: 'notice warn', text: s.flag_notes }) : null,
+      h('div', { class: 'field' }, h('label', { for: 's-side', text: 'Side' }), fSide,
+        h('p', { class: 'hint', text: 'Only change this after checking the drawing or the site. The section ID becomes the table ID + W or E.' })),
+      h('div', { class: 'field' }, h('label', { for: 's-review', text: 'Review status' }), fRev),
+      h('div', { class: 'field' }, h('label', { for: 's-note', text: 'Review note' }), fNote),
+      h('label', { class: 'check' }, fAct, h('span', { text: 'Include this section in monitoring and counts' })),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
 
@@ -1477,20 +1978,20 @@
     clearTimeout(toastTimer); toastTimer = setTimeout(function () { el.hidden = true; }, ms || 4500);
   }
   function showHelp() {
-    openModal('How to update a table', [
+    openModal('How to use the keyplan', [
+      h('p', { class: 'small', text: 'Every table is split into a West (W, left) and an East (E, right) section, for example M01-R02-T20W and M01-R02-T20E. Each section has its own statuses, contractor and history.' }),
       h('ol', { class: 'steps' },
-        h('li', { text: 'Sign in with the username and password from the administrator.' }),
         h('li', { text: 'Choose Block 1 or Block 5 at the top.' }),
-        h('li', { text: 'Find the table: zoom in (pinch or scroll) and tap it, or type its ID in the search box. Tapping only selects the table; nothing is saved.' }),
-        h('li', { text: 'Check the table ID shown in the panel. Press Update status.' }),
-        h('li', { text: 'Choose the activity (Mounting Structure or PV Module), the new status, and the company responsible for the work. Add a remark if needed.' }),
+        h('li', { text: 'Choose what the colours show: Contractors (who is responsible), Mounting Structure or PV Module (progress).' }),
+        h('li', { text: 'Find the section: zoom in (pinch or scroll) and tap it, or type its ID in the search box. Tapping only selects it; nothing is saved.' }),
+        h('li', { text: 'Press Update status, choose the activity and the new status. The contractor comes from the assignment. Add a remark if needed.' }),
         h('li', { text: 'Press Review update, check the summary, then press Confirm and save. Wait for the green “Saved” message.' })),
       h('div', { class: 'summary-grid' }, ST.map(function (s) {
         var d = { not_started: 'Work not started (or nothing recorded yet)', ongoing: 'Work in progress', completed: 'Work finished', on_hold: 'Work stopped or waiting' }[s];
         return [h('span', { class: 'sw s-' + s }), h('strong', { text: ST_LABEL[s] }), h('span', { class: 'small muted', text: d })];
       })),
-      h('p', { class: 'small', text: 'Mounting Structure and PV Module are tracked separately: completing one does not change the other. Every save records your username, the company and the server date and time. Earlier statuses stay in the history.' }),
-      h('p', { class: 'small', text: 'Hatched red outlines have no table ID in the drawing. They cannot be updated until the administrator assigns the ID.' })]);
+      h('p', { class: 'small', text: 'Subcontractors can update only the sections assigned to their company. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
+      h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' })]);
   }
   function openChangePassword() {
     var fCur = h('input', { id: 'cp-cur', type: 'password', autocomplete: 'current-password', maxlength: 100 });
@@ -1516,7 +2017,8 @@
     var tok = S.token;
     stopPolling();
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
-    S.selected = null; S.mode = 'details'; S.form = null; S.admin.users = null;
+    S.selected = null; S.mode = 'details'; S.form = null; S.admin.users = null; S.admin.log = null;
+    S.multi.clear(); S.pick = null; S.highlight = null;
     if (tok) rpc('logout', { p_token: tok }).catch(function () { /* already invalid */ });
     $('#user-pop').hidden = true;
     showLogin();
@@ -1538,7 +2040,7 @@
         S.token = d.token; store.set(LS_TOKEN, d.token); S.user = d.user;
         $('#login-pass').value = '';
         if (d.user.must_change_password) { showPasswordScreen(true); return; }
-        return loadBootstrap().then(function () { S.view = 'keyplan'; showApp(); });
+        return loadBootstrap().then(function () { S.page = 'keyplan'; afterLogin(); showApp(); });
       }).catch(function (e2) {
         err.textContent = e2.message; err.hidden = false;
       }).then(function () { btn.disabled = false; btn.textContent = 'Sign in'; });
@@ -1558,7 +2060,7 @@
       btn.disabled = true;
       rpc('change_password', { p_token: S.token, p_current_password: cur, p_new_password: nw })
         .then(function (d) { S.user = d.user; return loadBootstrap(); })
-        .then(function () { toast('Password saved.', 'ok'); showApp(); })
+        .then(function () { toast('Password saved.', 'ok'); afterLogin(); showApp(); })
         .catch(function (e2) {
           if (e2.hint === 'session') { signedOut(e2.message); return; }
           err.textContent = e2.message; err.hidden = false;
@@ -1566,9 +2068,13 @@
         .then(function () { btn.disabled = false; });
     });
     $('#pw-logout').addEventListener('click', logout);
-    $$('.tab').forEach(function (b) { b.addEventListener('click', function () { setView(b.dataset.view); }); });
+    $$('.tab').forEach(function (b) { b.addEventListener('click', function () { if (b.dataset.view !== 'keyplan') S.highlight = null; setPage(b.dataset.view); }); });
     $$('#seg-block button').forEach(function (b) { b.addEventListener('click', function () { setBlock(+b.dataset.block); }); });
-    $$('#seg-act button').forEach(function (b) { b.addEventListener('click', function () { setAct(b.dataset.act); }); });
+    $$('#seg-view button').forEach(function (b) { b.addEventListener('click', function () { setDisp(b.dataset.disp); }); });
+    $('#btn-scope').addEventListener('click', function () {
+      S.scopeOnly = !S.scopeOnly; renderToolbar(); paintStatuses(); renderPanel();
+      if (S.scopeOnly) fitScope(true);
+    });
     var ub = $('#user-btn'), pop = $('#user-pop');
     ub.addEventListener('click', function (e) { e.stopPropagation(); pop.hidden = !pop.hidden; ub.setAttribute('aria-expanded', String(!pop.hidden)); });
     document.addEventListener('click', function (e) { if (!pop.hidden && !pop.contains(e.target)) { pop.hidden = true; ub.setAttribute('aria-expanded', 'false'); } });
