@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' https://fpvtnaqjdywxuyfvdjfs.supabase.co; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#15212c">
+<title>Solar PV Installation Monitoring</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css?v=202610092345">
+<script src="config.js?v=202610092345" defer></script>
+<script src="app.js?v=202610092345" defer></script>
+</head>
+<body>
+<div id="boot" class="boot"><span class="boot-dot"></span>Loading…</div>
+
+<!-- ============ Sign in ============ -->
+<main id="screen-login" class="auth" hidden>
+  <form id="login-form" class="auth-card" novalidate>
+    <div class="auth-mark" aria-hidden="true">
+      <svg viewBox="0 0 40 40" width="40" height="40"><rect x="5" y="9" width="13" height="22" class="m1"/><rect x="21" y="9" width="13" height="22" class="m2"/><path d="M5 20h29" class="m3"/></svg>
+    </div>
+    <h1>Solar PV Installation Monitoring</h1>
+    <p class="auth-sub">Block 1 and Block 5 · Mounting Structure and PV Module installation</p>
+    <div class="field">
+      <label for="login-user">Username</label>
+      <input id="login-user" name="username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required>
+    </div>
+    <div class="field">
+      <label for="login-pass">Password</label>
+      <div class="pw-wrap">
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" maxlength="100" required>
+        <button type="button" class="pw-toggle" data-for="login-pass" aria-label="Show password">Show</button>
+      </div>
+    </div>
+    <p id="login-error" class="form-error" role="alert" hidden></p>
+    <button class="btn primary wide" type="submit" id="login-btn">Sign in</button>
+    <p class="auth-fine">Accounts are created by the project administrator. There is no public sign-up.</p>
+  </form>
+</main>
+
+<!-- ============ Set a new password ============ -->
+<main id="screen-password" class="auth" hidden>
+  <form id="pw-form" class="auth-card" novalidate>
+    <h1>Set a new password</h1>
+    <p class="auth-sub" id="pw-intro">Your account has a temporary password. Choose a new one to continue.</p>
+    <div class="field">
+      <label for="pw-current">Current (temporary) password</label>
+      <input id="pw-current" type="password" autocomplete="current-password" maxlength="100" required>
+    </div>
+    <div class="field">
+      <label for="pw-new">New password</label>
+      <input id="pw-new" type="password" autocomplete="new-password" minlength="8" maxlength="72" required>
+      <p class="hint">At least 8 characters.</p>
+    </div>
+    <div class="field">
+      <label for="pw-confirm">Type the new password again</label>
+      <input id="pw-confirm" type="password" autocomplete="new-password" minlength="8" maxlength="72" required>
+    </div>
+    <p id="pw-error" class="form-error" role="alert" hidden></p>
+    <button class="btn primary wide" type="submit" id="pw-btn">Save new password</button>
+    <button class="btn ghost wide" type="button" id="pw-logout">Log out</button>
+  </form>
+</main>
+
+<!-- ============ Application ============ -->
+<div id="screen-app" class="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 40 40" width="26" height="26" aria-hidden="true"><rect x="5" y="9" width="13" height="22" class="m1"/><rect x="21" y="9" width="13" height="22" class="m2"/><path d="M5 20h29" class="m3"/></svg>
+      <span class="brand-name"><span class="long">Solar PV Installation Monitoring</span><span class="short">PV Monitoring</span></span>
+    </div>
+    <nav class="tabs" aria-label="Main">
+      <button type="button" class="tab" data-view="keyplan" aria-current="page">Keyplan</button>
+      <button type="button" class="tab" data-view="dashboard">Dashboard</button>
+      <button type="button" class="tab" data-view="admin" id="tab-admin" hidden>Admin</button>
+    </nav>
+    <div class="user">
+      <button type="button" class="user-btn" id="user-btn" aria-haspopup="true" aria-expanded="false">
+        <span class="avatar" id="user-avatar" aria-hidden="true"></span><span class="user-name" id="user-name"></span>
+      </button>
+      <div class="user-pop" id="user-pop" hidden>
+        <div class="user-pop-head">
+          <strong id="user-pop-name"></strong>
+          <span id="user-pop-role"></span>
+        </div>
+        <button type="button" class="menu-item" id="btn-help">How to update a table</button>
+        <button type="button" class="menu-item" id="btn-change-pw">Change my password</button>
+        <button type="button" class="menu-item danger" id="btn-logout">Log out</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Keyplan view -->
+  <section id="view-keyplan" class="view view-keyplan">
+    <div class="toolbar">
+      <div class="seg" id="seg-block" role="group" aria-label="Block">
+        <button type="button" data-block="1">Block 1</button>
+        <button type="button" data-block="5">Block 5</button>
+      </div>
+      <div class="seg" id="seg-act" role="group" aria-label="Show status of">
+        <button type="button" data-act="mounting"><span class="long">Mounting Structure</span><span class="short">Mounting</span></button>
+        <button type="button" data-act="module"><span class="long">PV Module</span><span class="short">PV Module</span></button>
+      </div>
+      <div class="search" id="search-box">
+        <svg class="search-ico" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4.5 4.5"/></svg>
+        <input id="search" type="search" placeholder="Find table ID, e.g. M01-R01-T11" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Find a table by its ID" aria-autocomplete="list" aria-controls="search-list">
+        <ul id="search-list" class="search-list" role="listbox" hidden></ul>
+      </div>
+      <div class="sync" id="sync" title="Data refreshes automatically every 20 seconds"><span class="sync-dot"></span><span id="sync-text">Connecting…</span></div>
+    </div>
+    <div class="legend-strip" id="legend-strip" aria-label="Legend"></div>
+
+    <div class="stage">
+      <div class="canvas" id="canvas">
+        <svg id="kp" class="kp" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Keyplan" tabindex="0"></svg>
+        <div class="zoom-ctl" role="group" aria-label="Zoom">
+          <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+          <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+          <button type="button" id="zoom-fit" aria-label="Show whole block" class="fit">
+            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>
+          </button>
+        </div>
+        <div class="titleblock" id="titleblock" aria-label="Legend"></div>
+        <p class="canvas-hint" id="canvas-hint">Drag to move · scroll or pinch to zoom · tap a table to select it</p>
+      </div>
+      <aside class="panel" id="panel" aria-label="Selected table"></aside>
+    </div>
+  </section>
+
+  <!-- Dashboard view -->
+  <section id="view-dashboard" class="view view-page" hidden>
+    <div class="page" id="dash"></div>
+  </section>
+
+  <!-- Admin view -->
+  <section id="view-admin" class="view view-page" hidden>
+    <div class="page" id="admin"></div>
+  </section>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head"><h2 id="modal-title"></h2><button type="button" class="icon-btn" id="modal-close" aria-label="Close">×</button></div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+<noscript><p class="noscript">This application needs JavaScript. Please enable it in your browser.</p></noscript>
+</body>
+</html>
