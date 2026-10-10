@@ -9,9 +9,9 @@
 <meta name="theme-color" content="#15212c">
 <title>Solar PV Installation Monitoring</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=202610100644">
-<script src="config.js?v=202610100644" defer></script>
-<script src="app.js?v=202610100644" defer></script>
+<link rel="stylesheet" href="styles.css?v=202610101216">
+<script src="config.js?v=202610101216" defer></script>
+<script src="app.js?v=202610101216" defer></script>
 </head>
 <body>
 <div id="boot" class="boot"><span class="boot-dot"></span>Loading…</div>
@@ -100,10 +100,13 @@
         <button type="button" data-block="1">Block 1</button>
         <button type="button" data-block="5">Block 5</button>
       </div>
-      <div class="seg" id="seg-view" role="group" aria-label="Keyplan shows">
-        <button type="button" data-disp="assign"><span class="long">Contractors</span><span class="short">Contractors</span></button>
-        <button type="button" data-disp="mounting"><span class="long">Mounting Structure</span><span class="short">Mounting</span></button>
-        <button type="button" data-disp="module"><span class="long">PV Module</span><span class="short">PV Module</span></button>
+      <div class="seg" id="seg-view" role="group" aria-label="Colours show">
+        <button type="button" data-disp="assign">Contractors</button>
+        <button type="button" data-disp="status">Status</button>
+      </div>
+      <div class="seg" id="seg-act" role="group" aria-label="Activity">
+        <button type="button" data-act="mounting"><span class="long">Mounting Structure</span><span class="short">Mounting</span></button>
+        <button type="button" data-act="module">PV Module</button>
       </div>
       <button type="button" class="scope-btn" id="btn-scope" aria-pressed="true" hidden>My scope</button>
       <div class="search" id="search-box">
@@ -112,6 +115,7 @@
         <ul id="search-list" class="search-list" role="listbox" hidden></ul>
       </div>
       <div class="sync" id="sync" title="Data refreshes automatically every 20 seconds"><span class="sync-dot"></span><span id="sync-text">Connecting…</span></div>
+      <span class="tb-break" aria-hidden="true"></span>
     </div>
     <div class="legend-strip" id="legend-strip" aria-label="Legend"></div>
 

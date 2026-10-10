@@ -1,13 +1,16 @@
-/* Solar PV Installation Monitoring — browser client (update 2: West/East sections + contractor assignment).
+/* Solar PV Installation Monitoring — browser client
+   (update 3: West/East sections, contractor assignment per activity).
    Talks only to the database functions (Supabase RPC). No other services. */
 (function () {
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
+  var DB_VERSION = 3;
   var ACT = { mounting: 'Mounting Structure Installation', module: 'PV Module Installation' };
   var ACT_SHORT = { mounting: 'Mounting Structure', module: 'PV Module' };
+  var ACT_TINY = { mounting: 'Mounting', module: 'PV Module' };
   var ACTS = ['mounting', 'module'];
-  var DISP_LABEL = { assign: 'Contractor assignment', mounting: 'Mounting Structure Installation', module: 'PV Module Installation' };
+  function otherAct(a) { return a === 'mounting' ? 'module' : 'mounting'; }
   var ST = ['not_started', 'ongoing', 'completed', 'on_hold'];
   var ST_LABEL = { not_started: 'Not Started', ongoing: 'Ongoing', completed: 'Completed', on_hold: 'On Hold' };
   var ROLE_LABEL = { admin: 'Administrator', subcontractor: 'Subcontractor', viewer: 'Viewer (read only)' };
@@ -19,7 +22,8 @@
     half_outline: 'Only one half drawn',
     split_unresolved: 'West/East not confirmed'
   };
-  var PALETTE = ['#2563eb', '#7c3aed', '#c026d3', '#0891b2', '#92400e', '#1e3a8a', '#db2777', '#0f766e', '#a78bfa', '#38bdf8'];
+  // contractor colours (the database sends the same list; kept clear of the status colours)
+  var PALETTE = ['#2563eb', '#92400e', '#0f766e', '#38bdf8', '#1e293b', '#86198f', '#a78bfa', '#7c3aed', '#0891b2', '#1e3a8a', '#c026d3'];
   var BLOCKS = [1, 5];
   var POLL_MS = 20000;
   var LS_TOKEN = 'pvm.token';
@@ -160,10 +164,11 @@
     token: null, user: null, kp: {}, tables: new Map(), sections: new Map(), secByBlock: { 1: [], 5: [] },
     companies: [], compById: new Map(), assign: new Map(), cur: new Map(), history: new Map(),
     metaVersion: 0, serverTime: null, lastSync: null, syncErr: false, polling: false, pollTimer: null,
-    page: 'keyplan', block: 1, disp: 'mounting', selected: null, mode: 'details', form: null,
-    scopeOnly: true, pick: null, multi: new Set(), highlight: null, firstFit: true,
+    // disp: what the colours show ('assign' = contractors, 'status' = installation status); act: which activity
+    page: 'keyplan', block: 1, disp: 'status', act: 'mounting', selected: null, mode: 'details', form: null,
+    scopeOnly: true, pick: null, multi: new Set(), multiFresh: false, highlight: null, firstFit: true,
     dash: { block: 'all', act: 'all', status: 'all', company: 'all', page: 0 },
-    admin: { tab: 'accounts', users: null, log: null, reviewAll: false, afilter: { block: 'all', company: 'all', area: 'all', page: 0 } }
+    admin: { tab: 'accounts', users: null, log: null, reviewAll: false, afilter: { block: 'all', act: 'all', company: 'all', area: 'all', page: 0 } }
   };
   function curOf(sid, act) { return S.cur.get(sid + '|' + act) || null; }
   function statusOf(sid, act) { var u = curOf(sid, act); return u ? u.status : 'not_started'; }
@@ -177,16 +182,32 @@
     var other = p.sections.filter(function (id) { return id !== s.id; })[0];
     return other ? S.sections.get(other) : null;
   }
-  function asgOf(sid) { return S.assign.get(sid) || null; }
+  // contractor assigned to one activity of one section
+  function asgOf(sid, act) { return S.assign.get(sid + '|' + act) || null; }
   function company(id) { return S.compById.get(id) || null; }
   function companyName(id) { var c = company(id); return c ? c.name : ''; }
   function colorOf(id) { var c = company(id); return (c && c.color) || '#9aa5b0'; }
   function activeCompanies() { return S.companies.filter(function (c) { return c.is_active; }); }
-  function inMyScope(s) { var a = asgOf(s.id); return !!(a && S.user && S.user.company_id && a.company_id === S.user.company_id); }
-  function canUpdate(s) {
+  function inMyScope(s, act) {
+    var a = asgOf(s.id, act);
+    return !!(a && S.user && S.user.company_id && a.company_id === S.user.company_id);
+  }
+  function canUpdate(s, act) {
     if (!S.user || !s || !counted(s)) return false;
     if (S.user.role === 'admin') return true;
-    return S.user.role === 'subcontractor' && inMyScope(s);
+    return S.user.role === 'subcontractor' && inMyScope(s, act);
+  }
+  function updatableActs(s) { return ACTS.filter(function (a) { return canUpdate(s, a); }); }
+  // sections assigned to the signed-in subcontractor's company: { mounting: {1: n, 5: n}, module: {...} }
+  function myCounts() {
+    var c = { mounting: { 1: 0, 5: 0 }, module: { 1: 0, 5: 0 } };
+    if (!S.user || !S.user.company_id) return c;
+    S.assign.forEach(function (a) {
+      if (a.company_id !== S.user.company_id) return;
+      var s = S.sections.get(a.section_id);
+      if (s && counted(s) && c[a.activity]) c[a.activity][s.block]++;
+    });
+    return c;
   }
   function secLabel(s) { return s.code || (parentOf(s) && parentOf(s).code ? parentOf(s).code + (s.side || '?') : 'NO ID'); }
 
@@ -213,8 +234,13 @@
     ['#pw-current', '#pw-new', '#pw-confirm'].forEach(function (s) { $(s).value = ''; });
     setTimeout(function () { $('#pw-current').focus(); }, 30);
   }
+  function resetScreenState() {
+    S.selected = null; S.mode = 'details'; S.form = null; S.admin.users = null; S.admin.log = null;
+    S.multi.clear(); S.multiFresh = false; S.pick = null; S.highlight = null;
+  }
   function signedOut(message) {
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
+    resetScreenState();
     closeModal();
     showLogin(message || 'You have been logged out.');
   }
@@ -237,7 +263,9 @@
     }
     var p = prefs();
     if (BLOCKS.indexOf(p.block) >= 0) S.block = p.block;
-    if (['assign', 'mounting', 'module'].indexOf(p.disp) >= 0) S.disp = p.disp;
+    if (p.disp === 'assign' || p.disp === 'status') S.disp = p.disp;
+    else if (ACTS.indexOf(p.disp) >= 0) { S.disp = 'status'; S.act = p.disp; } // saved by update 2
+    if (ACTS.indexOf(p.act) >= 0) S.act = p.act;
     var tok = store.get(LS_TOKEN);
     if (!tok) { showLogin(); return; }
     S.token = tok;
@@ -250,7 +278,12 @@
 
   function loadBootstrap() {
     return rpc('get_bootstrap', { p_token: S.token }).then(function (d) {
-      if (d.version !== 2) throw ApiError('The database needs the latest update (update 2). Ask the administrator to run it.', 'version', 0);
+      if (d.version !== DB_VERSION) {
+        throw ApiError(d.version < DB_VERSION
+          ? 'The database needs the latest update (update ' + DB_VERSION + '). Ask the administrator to run it, then reload this page.'
+          : 'A newer version of this app is available. Reload the page.', 'version', 0);
+      }
+      if (Array.isArray(d.palette) && d.palette.length) PALETTE = d.palette.map(function (c) { return String(c).toLowerCase(); });
       S.kp = {};
       d.keyplans.forEach(function (k) { S.kp[k.block] = k; });
       S.tables = new Map();
@@ -266,7 +299,7 @@
       });
       S.companies = d.companies || [];
       S.compById = new Map(); S.companies.forEach(function (c) { S.compById.set(c.id, c); });
-      S.assign = new Map(); (d.assignments || []).forEach(function (a) { S.assign.set(a.section_id, a); });
+      S.assign = new Map(); (d.assignments || []).forEach(function (a) { S.assign.set(a.section_id + '|' + a.activity, a); });
       S.cur = new Map();
       d.current.forEach(function (u) { S.cur.set(u.section_id + '|' + u.activity, u); });
       S.history = new Map();
@@ -276,19 +309,21 @@
       if (S.selected && !S.sections.has(S.selected)) { S.selected = null; S.mode = 'details'; }
       S.multi.forEach(function (id) { if (!S.sections.has(id)) S.multi.delete(id); });
       applyUser(d.user);
-      KP.block = null; // force rebuild
+      KP.stale = true; // rebuild the keyplan with the new data; the zoom and position are kept
     });
   }
 
-  // first view after signing in: subcontractors start on their own scope
+  // first view after signing in: subcontractors start on the status of their own activity and block
   function afterLogin() {
     S.firstFit = true;
+    S.highlight = null;
     if (isSub()) {
       S.scopeOnly = true;
-      if (S.disp === 'assign') S.disp = 'mounting';
-      var cnt = { 1: 0, 5: 0 };
-      S.assign.forEach(function (a, sid) { if (a.company_id === S.user.company_id) { var s = S.sections.get(sid); if (s) cnt[s.block]++; } });
-      if (cnt[1] || cnt[5]) S.block = cnt[5] > cnt[1] ? 5 : 1;
+      S.disp = 'status';
+      var cnt = myCounts();
+      var tot = function (a) { return cnt[a][1] + cnt[a][5]; };
+      if (!tot(S.act) && tot(otherAct(S.act))) S.act = otherAct(S.act);
+      if (tot(S.act) && !cnt[S.act][S.block]) S.block = S.block === 1 ? 5 : 1;
     }
   }
 
@@ -324,7 +359,9 @@
     $('#view-admin').hidden = v !== 'admin';
     if (v === 'keyplan') {
       renderToolbar();
-      if (KP.block !== S.block) buildKeyplan(); else { paintStatuses(); requestAnimationFrame(onResize); }
+      if (KP.block !== S.block) buildKeyplan();
+      else if (KP.stale) rebuildKeyplan();
+      else { paintStatuses(); requestAnimationFrame(onResize); }
       renderPanel();
     } else if (v === 'dashboard') {
       renderDashboard(changed || force);
@@ -336,6 +373,7 @@
   function renderToolbar() {
     $$('#seg-block button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.block === S.block)); });
     $$('#seg-view button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.disp === S.disp)); });
+    $$('#seg-act button').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.act === S.act)); });
     $('#btn-scope').setAttribute('aria-pressed', String(S.scopeOnly));
     renderSync();
   }
@@ -344,14 +382,25 @@
     S.block = b; savePrefs({ block: b });
     var s = S.sections.get(S.selected);
     if (s && s.block !== b) { S.selected = null; S.mode = 'details'; S.form = null; }
-    S.multi.clear();
+    S.multi.clear(); S.multiFresh = false;
     renderToolbar(); buildKeyplan(); renderPanel();
   }
+  // what the colours show: contractors or installation status
   function setDisp(d) {
-    if (d === S.disp) return;
+    if (d === S.disp || (d !== 'assign' && d !== 'status')) return;
     S.disp = d; savePrefs({ disp: d });
-    if (d !== 'assign') { S.pick = null; S.multi.clear(); }
+    if (d !== 'assign') { S.pick = null; S.multi.clear(); S.multiFresh = false; }
     renderToolbar(); paintStatuses(); renderPanel();
+  }
+  // which activity the keyplan shows; a selection made for assigning is kept, so the
+  // same sections can be given a contractor for the other activity
+  function setAct(a) {
+    if (a === S.act || ACTS.indexOf(a) < 0) return;
+    S.act = a; savePrefs({ act: a });
+    renderToolbar(); paintStatuses(); renderPanel();
+  }
+  function modeLabel() {
+    return (S.disp === 'assign' ? 'Contractors · ' : 'Status · ') + ACT[S.act];
   }
 
   // ------------------------------------------------------------------
@@ -399,7 +448,7 @@
     el.append(gt, glb);
     KP.sel = svg('g', { class: 'sel-layer' });
     el.append(KP.sel);
-    KP.block = S.block;
+    KP.block = S.block; KP.stale = false;
     paintStatuses();
     var tok = KP.fitToken = {};
     requestAnimationFrame(function () {
@@ -410,19 +459,28 @@
     });
   }
 
+  // Rebuild with fresh data. On the same block the zoom and position stay where the user left them
+  // (after assigning, or when someone else's change reloads the data); a new sign-in fits as usual.
+  function rebuildKeyplan() {
+    var keep = !S.firstFit && KP.svg && KP.view && KP.block === S.block ? Object.assign({}, KP.view) : null;
+    buildKeyplan();
+    if (keep) { KP.fitToken = null; requestAnimationFrame(function () { setVB(keep); onResize(); }); }
+  }
+
+  // S.highlight = { cid }: show one contractor's sections for the activity on screen
   function dimmed(s) {
-    if (S.highlight) return !S.highlight.has(s.id);
-    if (isSub() && S.scopeOnly) return !inMyScope(s);
+    if (S.highlight) { var a = asgOf(s.id, S.act); return !(a && a.company_id === S.highlight.cid); }
+    if (isSub() && S.scopeOnly) return !inMyScope(s, S.act);
     return false;
   }
   function secClass(s) {
     var c = 't';
     if (S.disp === 'assign') {
-      c += asgOf(s.id) ? ' asg' : ' unasg';
+      c += asgOf(s.id, S.act) ? ' asg' : ' unasg';
       if (!s.code) c += ' noid-o';
     } else if (!s.code) c += ' noid';
     else if (!s.is_active) c += ' off';
-    else c += ' s-' + statusOf(s.id, S.disp);
+    else c += ' s-' + statusOf(s.id, S.act);
     if (s.id === S.selected) c += ' sel';
     if (S.multi.has(s.id)) c += ' msel';
     if (dimmed(s)) c += ' dim';
@@ -433,10 +491,11 @@
     KP.svg.classList.toggle('v-assign', S.disp === 'assign');
     KP.svg.classList.toggle('picking', S.pick === 'tap');
     KP.svg.classList.toggle('area-mode', S.pick === 'area');
+    KP.svg.setAttribute('aria-label', 'Keyplan Block ' + S.block + ' · ' + modeLabel());
     (S.secByBlock[S.block] || []).forEach(function (s) {
       var g = KP.groups.get(s.id); if (!g) return;
       g.setAttribute('class', secClass(s));
-      var a = asgOf(s.id);
+      var a = asgOf(s.id, S.act);
       if (a) g.style.setProperty('--c', colorOf(a.company_id)); else g.style.removeProperty('--c');
     });
     renderLegend();
@@ -485,7 +544,7 @@
   function fitScope(animate) {
     var bb = [Infinity, Infinity, -Infinity, -Infinity], n = 0;
     (S.secByBlock[S.block] || []).forEach(function (s) {
-      if (!inMyScope(s) || !s._bb) return;
+      if (!inMyScope(s, S.act) || !s._bb) return;
       n++; bb = [Math.min(bb[0], s._bb[0]), Math.min(bb[1], s._bb[1]), Math.max(bb[2], s._bb[2]), Math.max(bb[3], s._bb[3])];
     });
     if (!n) return false;
@@ -633,6 +692,7 @@
           removeAreaRect();
           if (g.moved >= 5) {
             var hit = sectionsInRect(g.start, toUser(e.clientX, e.clientY));
+            if (hit.length) startNewSelection();
             hit.forEach(function (s) { S.multi.add(s.id); });
             paintStatuses(); renderPanel();
             if (!hit.length) toast('No sections inside that area. Draw a box around the tables.', 'err');
@@ -664,7 +724,7 @@
       if (e.key === '+' || e.key === '=') zoomCenter(1.5);
       else if (e.key === '-' || e.key === '_') zoomCenter(1 / 1.5);
       else if (e.key === '0') fitView(true);
-      else if (e.key === 'Escape' && S.multi.size) { S.multi.clear(); paintStatuses(); renderPanel(); }
+      else if (e.key === 'Escape' && S.multi.size) { S.multi.clear(); S.multiFresh = false; paintStatuses(); renderPanel(); }
       else if (e.key === 'ArrowLeft') setVB(clampCenter({ x: v.x - v.w * step, y: v.y, w: v.w, h: v.h }));
       else if (e.key === 'ArrowRight') setVB(clampCenter({ x: v.x + v.w * step, y: v.y, w: v.w, h: v.h }));
       else if (e.key === 'ArrowUp') setVB(clampCenter({ x: v.x, y: v.y - v.h * step, w: v.w, h: v.h }));
@@ -692,39 +752,41 @@
     var list = S.secByBlock[S.block] || [];
     var rows = [], noid = 0;
     if (S.disp === 'assign') {
+      // contractors of the activity on screen only
       var byCo = new Map(), un = 0;
       list.forEach(function (s) {
-        var a = asgOf(s.id);
+        var a = asgOf(s.id, S.act);
         if (a) byCo.set(a.company_id, (byCo.get(a.company_id) || 0) + 1); else un++;
       });
       Array.from(byCo.keys()).sort(function (a, b) { return companyName(a).localeCompare(companyName(b)); }).forEach(function (cid) {
-        rows.push({ sw: function () { return h('span', { class: 'sw c', color: colorOf(cid) }); }, label: companyName(cid), n: byCo.get(cid) });
+        rows.push({ sw: function () { return h('span', { class: 'sw c', color: colorOf(cid) }); }, label: companyName(cid), n: byCo.get(cid), cid: cid });
       });
       rows.push({ sw: function () { return h('span', { class: 'sw unasg' }); }, label: 'Unassigned', n: un });
-      return { rows: rows, total: list.length, title: 'Contractor assignment', foot: ['Assigned', fmtPct(list.length - un, list.length)] };
+      return { rows: rows, total: list.length, kind: 'Contractors', note: 'who is responsible, not progress', foot: ['Assigned', fmtPct(list.length - un, list.length)] };
     }
     var c = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 }, total = 0;
-    list.forEach(function (s) { if (!s.code) { noid++; return; } if (!s.is_active) return; total++; c[statusOf(s.id, S.disp)]++; });
+    list.forEach(function (s) { if (!s.code) { noid++; return; } if (!s.is_active) return; total++; c[statusOf(s.id, S.act)]++; });
     ST.forEach(function (st) { rows.push({ sw: function () { return h('span', { class: 'sw s-' + st }); }, label: ST_LABEL[st], n: c[st] }); });
     if (noid) rows.push({ sw: function () { return h('span', { class: 'sw noid' }); }, label: 'No section ID', n: noid });
-    return { rows: rows, total: total, title: DISP_LABEL[S.disp], foot: ['Completed', fmtPct(c.completed, total)] };
+    return { rows: rows, total: total, kind: 'Installation status', note: '', foot: ['Completed', fmtPct(c.completed, total)] };
   }
   function renderLegend() {
     var tb = $('#titleblock'); if (!tb) return;
     var L = legendRows();
     tb.textContent = '';
+    tb.setAttribute('data-disp', S.disp); tb.setAttribute('data-act', S.act);
     var rows = h('div', { class: 'tb-rows' });
     L.rows.forEach(function (r) { rows.append(h('div', null, r.sw()), h('div', { text: r.label }), h('div', { class: 'num', text: String(r.n) })); });
     tb.append(h('div', { class: 'tb-head' },
       h('div', { class: 'tb-blk', text: 'Block ' + S.block }),
       h('div', { class: 'tnum', text: L.total + ' sections' }),
-      h('div', { class: 'tb-act', text: L.title + (S.disp === 'assign' ? ' (who is responsible, not progress)' : '') })),
+      h('div', { class: 'tb-act' }, h('strong', { text: L.kind }), ' · ' + ACT[S.act], L.note ? h('span', { class: 'tb-note', text: L.note }) : null)),
       rows,
       h('div', { class: 'tb-foot' }, h('span', { text: L.foot[0] }), h('strong', { class: 'tnum', text: L.foot[1] })));
     var strip = $('#legend-strip');
     if (strip) {
       strip.textContent = '';
-      strip.append(h('span', { class: 'ls-title', text: 'B' + S.block + ' · ' + (S.disp === 'assign' ? 'Contractors' : S.disp === 'mounting' ? 'Mounting' : 'PV Module') }));
+      strip.append(h('span', { class: 'ls-title', text: 'B' + S.block + ' · ' + ACT_TINY[S.act] + (S.disp === 'assign' ? ' contractors' : ' status') }));
       L.rows.forEach(function (r) { strip.append(h('span', { class: 'ls-item' }, r.sw(), r.label + ' ', h('b', { text: String(r.n) }))); });
     }
   }
@@ -756,10 +818,16 @@
   }
   function toggleMulti(id) {
     if (!id) return;
+    if (S.multiFresh) { startNewSelection(); paintStatuses(); }
     if (S.multi.has(id)) S.multi.delete(id); else S.multi.add(id);
     var s = S.sections.get(id), g = KP.groups.get(id);
     if (s && g) g.setAttribute('class', secClass(s));
     renderPanel();
+  }
+  // After an assignment the sections stay selected (to assign the other activity too);
+  // the next tap or drawn area starts a new selection.
+  function startNewSelection() {
+    if (S.multiFresh) { S.multi.clear(); S.multiFresh = false; }
   }
 
   function renderPanel() {
@@ -768,12 +836,24 @@
     P.textContent = '';
     var s = S.sections.get(S.selected);
     var tools = S.disp === 'assign' && canAssign() && (S.pick || S.multi.size);
-    P.classList.toggle('collapsed', !s && !tools && !S.highlight);
+    // phones: the panel is a bottom sheet; only short content may grow without a height limit
+    P.classList.toggle('collapsed', !s && !S.highlight && !(S.disp === 'assign' && canAssign()));
     if (S.highlight) {
-      P.append(h('div', { class: 'notice info sibling' }, h('span', { text: 'Showing ' + plural(S.highlight.size, 'section') + ' of one contractor.' }),
+      var hn = (S.secByBlock[S.block] || []).filter(function (x) { var a = asgOf(x.id, S.act); return a && a.company_id === S.highlight.cid; }).length;
+      P.append(h('div', { class: 'notice info sibling' }, cchip(S.highlight.cid),
+        h('span', { text: ACT_SHORT[S.act] + ': ' + plural(hn, 'section') + ' in Block ' + S.block + '.' }),
         h('button', { type: 'button', class: 'btn small', text: 'Show all', onclick: function () { S.highlight = null; paintStatuses(); renderPanel(); } })));
     }
-    if (s && !tools) {
+    if (s && S.mode !== 'details' && S.form && !canUpdate(s, S.form.act)) {
+      // the assignment (or the section) changed while the form was open
+      var lostAct = S.form.act;
+      S.mode = 'details'; S.form = null;
+      toast(isSub() ? ACT_SHORT[lostAct] + ' of ' + secLabel(s) + ' is no longer assigned to your company. Nothing was saved.'
+        : secLabel(s) + ' was changed and can no longer be updated. Nothing was saved.', 'err', 8000);
+    }
+    // a section opened on purpose (tap without a tool, search, link) is shown even while
+    // sections are selected for assigning; closing it brings the assignment tools back
+    if (s) {
       if (S.mode === 'form') renderForm(P, s);
       else if (S.mode === 'confirm') renderConfirm(P, s);
       else renderDetails(P, s);
@@ -805,24 +885,24 @@
 
   function renderPanelSummary(P) {
     var mobile = window.innerWidth <= 900;
-    var act = S.disp === 'assign' ? 'mounting' : S.disp;
+    var act = S.act;
     if (isSub()) { renderScope(P, mobile); return; }
     if (mobile) {
-      P.append(h('p', { class: 'panel-sub' }, h('strong', { text: 'Tap a section' }), ' to see its contractor and status' + (isAdmin() ? ' and update it.' : '.')));
+      P.append(h('p', { class: 'panel-sub' }, h('strong', { text: 'Tap a section' }), ' to see its contractors and status' + (isAdmin() ? ' and update it.' : '.')));
       return;
     }
     var list = (S.secByBlock[S.block] || []).filter(counted);
     if (S.disp === 'assign') {
-      var assigned = list.filter(function (s) { return asgOf(s.id); }).length;
+      var assigned = list.filter(function (s) { return asgOf(s.id, act); }).length;
       P.append(h('div', { class: 'stack' },
-        h('div', null, h('h2', { text: 'Block ' + S.block + ' · Contractors' }),
-          h('p', { class: 'panel-sub', text: assigned + ' of ' + list.length + ' sections are assigned to a contractor.' })),
-        h('p', { class: 'small muted', text: 'Colours show which company is responsible for each section. They do not show progress: switch to Mounting Structure or PV Module for that.' })));
+        h('div', null, h('h2', { text: 'Block ' + S.block + ' · Contractors · ' + ACT_SHORT[act] }),
+          h('p', { class: 'panel-sub', text: assigned + ' of ' + list.length + ' sections have a ' + ACT_SHORT[act] + ' contractor.' })),
+        h('p', { class: 'small muted', text: 'Colours show which company is responsible for ' + ACT[act] + ' on each section. Switch the activity above to see the ' + ACT_SHORT[otherAct(act)] + ' contractors. Colours do not show progress: choose Status for that.' })));
       return;
     }
     var c = statusCounts(list, act);
     P.append(h('div', { class: 'stack' },
-      h('div', null, h('h2', { text: 'Block ' + S.block + ' · ' + ACT_SHORT[act] }),
+      h('div', null, h('h2', { text: 'Block ' + S.block + ' · ' + ACT_SHORT[act] + ' status' }),
         h('p', { class: 'panel-sub', text: list.length + ' sections with an ID (each table has a West and an East section)' })),
       statusBar(c, list.length),
       h('div', { class: 'summary-grid' }, ST.map(function (st) {
@@ -834,129 +914,179 @@
           ? h('ol', { class: 'steps' },
             h('li', { text: 'Choose the block and the activity above.' }),
             h('li', { text: 'Tap the West or East section of a table, or type its ID in the search box.' }),
-            h('li', { text: 'Press Update status, choose the status and check the company.' }),
+            h('li', { text: 'Press Update status on the activity, choose the status and check the company.' }),
             h('li', { text: 'Check the summary, then press Confirm and save.' }))
-          : h('p', { class: 'small', text: 'Tap a section to see its contractor, status and history.' }))));
+          : h('p', { class: 'small', text: 'Tap a section to see its contractors, status and history.' }))));
   }
 
+  // Subcontractor: their scope per activity (an assignment for one activity does not cover the other)
   function renderScope(P, mobile) {
-    var mine = [], byBlock = { 1: 0, 5: 0 };
-    S.sections.forEach(function (s) { if (inMyScope(s) && counted(s)) { mine.push(s); byBlock[s.block]++; } });
-    var act = S.disp === 'assign' ? 'mounting' : S.disp;
-    var here = mine.filter(function (s) { return s.block === S.block; });
-    var co = S.user.company_id;
+    var act = S.act, co = S.user.company_id, cnt = myCounts();
+    var here = (S.secByBlock[S.block] || []).filter(function (s) { return counted(s) && inMyScope(s, act); });
+    var total = cnt.mounting[1] + cnt.mounting[5] + cnt.module[1] + cnt.module[5];
+    var otherBlock = S.block === 1 ? 5 : 1, oa = otherAct(act);
     if (mobile) {
-      P.append(h('div', { class: 'sibling' }, cchip(co), h('span', { text: here.length ? plural(here.length, 'section') + ' in Block ' + S.block + '. Tap one to update it.' : 'Nothing assigned to you in Block ' + S.block + '.' })));
+      P.append(h('div', { class: 'sibling' }, cchip(co), h('span', {
+        text: here.length ? plural(here.length, 'section') + ' for ' + ACT_SHORT[act] + ' in Block ' + S.block + '. Tap one to update it.'
+          : 'No ' + ACT_SHORT[act] + ' sections for you in Block ' + S.block + (cnt[oa][S.block] ? '. You have ' + ACT_SHORT[oa] + ' sections here.' : '.')
+      })));
       return;
     }
     var stack = h('div', { class: 'stack scope-card' },
       h('div', null, h('h2', { text: 'Your scope' }), h('div', { class: 'sibling' }, cchip(co))));
-    if (!mine.length) {
-      stack.append(h('div', { class: 'notice warn', text: 'No sections are assigned to your company yet. Ask the administrator to assign your tables.' }));
+    if (!total) {
+      stack.append(h('div', { class: 'notice warn', text: 'No sections are assigned to your company yet. Ask the administrator to assign your tables and activity.' }));
       P.append(stack); return;
     }
-    var c = statusCounts(here, act);
-    stack.append(
-      h('p', { class: 'panel-sub', text: 'Block 1: ' + plural(byBlock[1], 'section') + ' · Block 5: ' + plural(byBlock[5], 'section') }),
-      here.length ? [h('p', { class: 'small', text: ACT_SHORT[act] + ' in Block ' + S.block + ':' }), statusBar(c, here.length),
+    stack.append(h('table', { class: 'scope-tbl' },
+      h('thead', null, h('tr', null, h('th', { text: 'Activity' }), h('th', { class: 'num', text: 'Block 1' }), h('th', { class: 'num', text: 'Block 5' }))),
+      h('tbody', null, ACTS.map(function (a) {
+        return h('tr', { class: a === act ? 'is-current' : null },
+          h('td', null, a === act ? h('strong', { text: ACT_SHORT[a] })
+            : h('button', { type: 'button', class: 'link-btn', text: ACT_SHORT[a], onclick: function () { setAct(a); if (S.scopeOnly) fitScope(true); } })),
+          h('td', { class: 'num', text: String(cnt[a][1]) }), h('td', { class: 'num', text: String(cnt[a][5]) }));
+      }))));
+    if (here.length) {
+      var c = statusCounts(here, act);
+      stack.append(h('p', { class: 'small', text: ACT_SHORT[act] + ' in Block ' + S.block + ':' }), statusBar(c, here.length),
         h('div', { class: 'summary-grid' }, ST.map(function (st) {
           return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: c[st] + ' · ' + fmtPct(c[st], here.length) })];
-        }))] : h('p', { class: 'small muted', text: 'Nothing assigned to you in Block ' + S.block + '. Switch blocks above.' }),
-      h('div', { class: 'tool-row' },
-        h('button', { type: 'button', class: 'btn small', text: 'Zoom to my sections', onclick: function () { if (!fitScope(true)) toast('Nothing assigned to you in this block.', 'err'); } })),
-      h('div', { class: 'notice info' }, h('strong', { text: 'To update a section' }),
-        h('ol', { class: 'steps' },
-          h('li', { text: 'Your sections are shown bright; others are faded (My scope button).' }),
-          h('li', { text: 'Tap the West or East section of a table, or search its ID.' }),
-          h('li', { text: 'Press Update status, choose the activity and status, then confirm.' }))));
+        })),
+        h('div', { class: 'tool-row' },
+          h('button', { type: 'button', class: 'btn small', text: 'Zoom to my sections', onclick: function () { if (!fitScope(true)) toast('Nothing assigned to you in this block.', 'err'); } })));
+    } else {
+      var tips = [];
+      if (cnt[act][otherBlock]) tips.push(h('button', { type: 'button', class: 'btn small', text: 'Go to Block ' + otherBlock, onclick: function () { setBlock(otherBlock); } }));
+      if (cnt[oa][S.block]) tips.push(h('button', { type: 'button', class: 'btn small', text: 'Show ' + ACT_SHORT[oa], onclick: function () { setAct(oa); if (S.scopeOnly) fitScope(true); } }));
+      stack.append(h('div', { class: 'notice warn' }, 'Your company has no ' + ACT_SHORT[act] + ' sections in Block ' + S.block + '.',
+        tips.length ? h('div', { class: 'tool-row tips' }, tips) : null));
+    }
+    stack.append(h('div', { class: 'notice info' }, h('strong', { text: 'To update a section' }),
+      h('ol', { class: 'steps' },
+        h('li', { text: 'Choose the activity above. Your sections for it are bright; the rest is faded (My scope).' }),
+        h('li', { text: 'Tap the West or East section of a table, or search its ID.' }),
+        h('li', { text: 'Press Update status, choose the status, then confirm.' }))));
     P.append(stack);
   }
 
+  function areaNames() {
+    var areas = new Set(); S.assign.forEach(function (a) { if (a.area) areas.add(a.area); });
+    return Array.from(areas).sort(function (a, b) { return a.localeCompare(b); });
+  }
+  // Assignment tools: always for ONE activity, the one shown on the keyplan
   function renderAssignTools(P) {
+    var act = S.act, oa = otherAct(act), mobile = window.innerWidth <= 900;
     var sel = Array.from(S.multi).map(function (id) { return S.sections.get(id); }).filter(Boolean);
     sel.sort(cmpSec);
     var byCo = new Map(), un = 0;
-    sel.forEach(function (s) { var a = asgOf(s.id); if (a) byCo.set(a.company_id, (byCo.get(a.company_id) || 0) + 1); else un++; });
-    var stack = h('div', { class: 'stack' },
+    sel.forEach(function (s) { var a = asgOf(s.id, act); if (a) byCo.set(a.company_id, (byCo.get(a.company_id) || 0) + 1); else un++; });
+    var compact = mobile && !sel.length;
+    var stack = h('div', { class: 'stack' + (compact ? ' compact' : '') },
       h('div', null, h('h2', { text: 'Assign contractors · Block ' + S.block }),
-        h('p', { class: 'panel-sub', text: 'Select sections, then choose the company. Assigning does not change any status.' })),
+        compact ? null : h('p', { class: 'panel-sub', text: 'Choose the activity, select sections, then choose the company. Assigning does not change any status.' })),
+      h('div', { class: 'field' }, h('span', { class: 'label', id: 'as-act-label', text: 'Activity to assign' }),
+        h('div', { class: 'act-pick', role: 'group', 'aria-labelledby': 'as-act-label' }, ACTS.map(function (x) {
+          return h('button', { type: 'button', 'data-act': x, 'aria-pressed': String(x === act), text: ACT_SHORT[x], onclick: function () { setAct(x); } });
+        })),
+        compact ? null : h('p', { class: 'hint', text: 'Only ' + ACT[act] + ' is assigned here. The ' + ACT_SHORT[oa] + ' contractor of each section stays as it is.' })),
       h('div', { class: 'tool-row' },
         h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'tap'), text: 'Tap to select', onclick: function () { setPick(S.pick === 'tap' ? null : 'tap'); } }),
         h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'area'), text: 'Draw an area', onclick: function () { setPick(S.pick === 'area' ? null : 'area'); } })),
       h('p', { class: 'mode-note', text: S.pick === 'area' ? 'Drag a box on the keyplan. Every section whose centre is inside is added. Use two fingers or the buttons to move.'
-        : S.pick === 'tap' ? 'Tap sections to add or remove them. Drag to move the keyplan.' : 'Choose a selection tool.' }));
+        : S.pick === 'tap' ? 'Tap sections to add or remove them. Drag to move the keyplan.' : 'Choose a selection tool, or pick a named area below.' }));
+    var names = areaNames();
+    if (names.length) {
+      var selArea = h('select', { id: 'as-pick-area' }, h('option', { value: '', text: 'Add the sections of a named area…' }),
+        names.map(function (n) { return h('option', { value: n, text: n }); }));
+      selArea.addEventListener('change', function () { if (selArea.value) selectNamedArea(selArea.value); });
+      stack.append(h('div', { class: 'field' }, h('label', { for: 'as-pick-area', text: 'Named area (Block ' + S.block + ')' }), selArea));
+    }
     stack.append(h('div', { class: 'sel-count', text: sel.length ? plural(sel.length, 'section') + ' selected' : 'No sections selected' }));
     if (sel.length) {
+      if (S.multiFresh) {
+        stack.append(h('p', { class: 'hint keep-note', text: 'Still selected, so you can switch the activity and assign it too. Tapping or drawing starts a new selection.' }));
+      }
       stack.append(h('div', { class: 'sel-list', text: sel.slice(0, 40).map(secLabel).join(', ') + (sel.length > 40 ? ' …' : '') }));
-      var cur = h('div', { class: 'summary-grid' });
+      var cur = h('div', { class: 'summary-grid', 'aria-label': 'Current ' + ACT_SHORT[act] + ' contractor of the selection' });
       byCo.forEach(function (n, cid) { cur.append(h('i', { class: 'cdot', color: colorOf(cid) }), h('span', { text: 'Now ' + companyName(cid) }), h('span', { class: 'num', text: String(n) })); });
       if (un) cur.append(h('i', { class: 'cdot none' }), h('span', { text: 'Now unassigned' }), h('span', { class: 'num', text: String(un) }));
-      stack.append(cur);
-      var areas = new Set(); S.assign.forEach(function (a) { if (a.area) areas.add(a.area); });
+      stack.append(h('p', { class: 'small', text: 'Current ' + ACT_SHORT[act] + ' contractor:' }), cur);
       var selCo = h('select', { id: 'as-company' }, h('option', { value: '', text: activeCompanies().length ? 'Choose the company…' : 'No companies yet' }),
         activeCompanies().map(function (c) { return h('option', { value: c.id, text: c.name, selected: S.lastAssignCo === c.id }); }));
       var area = h('input', { id: 'as-area', maxlength: 80, list: 'as-areas', placeholder: 'Optional, e.g. North cluster rows 1-6' });
       area.value = S.lastArea || '';
-      var dl = h('datalist', { id: 'as-areas' }, Array.from(areas).sort().map(function (a) { return h('option', { value: a }); }));
-      var btnA = h('button', { type: 'button', class: 'btn primary', text: 'Assign' });
+      var dl = h('datalist', { id: 'as-areas' }, names.map(function (a) { return h('option', { value: a }); }));
+      var btnA = h('button', { type: 'button', class: 'btn primary', id: 'btn-assign', text: 'Assign ' + ACT_SHORT[act] });
       btnA.addEventListener('click', function () {
         if (!selCo.value) { toast('Choose the company first.', 'err'); return; }
         S.lastAssignCo = +selCo.value; S.lastArea = area.value.trim();
         doAssign(Array.from(S.multi), +selCo.value, area.value.trim(), false);
       });
       stack.append(
-        h('div', { class: 'field' }, h('label', { for: 'as-company', text: 'Assign to' }), selCo),
+        h('div', { class: 'field' }, h('label', { for: 'as-company', text: 'Assign ' + ACT_SHORT[act] + ' to' }), selCo),
         h('div', { class: 'field' }, h('label', { for: 'as-area', text: 'Area name' }), area, dl),
         h('div', { class: 'tool-row' }, btnA,
           h('button', { type: 'button', class: 'btn', text: 'Unassign', disabled: !byCo.size, onclick: confirmUnassign }),
-          h('button', { type: 'button', class: 'btn ghost', text: 'Clear selection', onclick: function () { S.multi.clear(); paintStatuses(); renderPanel(); } })));
+          h('button', { type: 'button', class: 'btn ghost', text: 'Clear selection', onclick: function () { S.multi.clear(); S.multiFresh = false; paintStatuses(); renderPanel(); } })));
     }
-    if (!S.pick && !sel.length) {
+    if (!S.pick && !sel.length && !compact) {
       stack.append(h('p', { class: 'small muted', text: 'Tip: tap a section without a selection tool to see its details and history.' }));
     }
     P.append(stack);
+  }
+  function selectNamedArea(name) {
+    startNewSelection();
+    var n = 0;
+    (S.secByBlock[S.block] || []).forEach(function (s) {
+      if (ACTS.some(function (a) { var x = asgOf(s.id, a); return x && x.area === name; })) { S.multi.add(s.id); n++; }
+    });
+    paintStatuses(); renderPanel();
+    if (!n) toast('No sections of “' + name + '” in Block ' + S.block + '.', 'err');
   }
   function setPick(p) {
     S.pick = p;
     if (p) { S.selected = null; S.mode = 'details'; }
     paintStatuses(); renderPanel();
   }
-  function doAssign(ids, companyId, area, allowReassign) {
-    return call('assign_sections', { p_section_ids: ids, p_company_id: companyId, p_area: area || '', p_allow_reassign: !!allowReassign })
+  function doAssign(ids, companyId, area, allowReassign, forAct) {
+    var act = forAct || S.act;
+    return call('assign_sections', { p_section_ids: ids, p_activity: act, p_company_id: companyId, p_area: area || '', p_allow_reassign: !!allowReassign })
       .then(function (r) {
-        toast(companyId ? 'Assigned ' + plural(r.changed, 'section') + ' to ' + companyName(companyId) + (r.unchanged ? ' (' + r.unchanged + ' already were).' : '.')
-          : 'Unassigned ' + plural(r.changed, 'section') + '.', 'ok', 6000);
-        S.multi.clear(); closeModal();
+        toast((companyId ? 'Assigned ' + plural(r.changed, 'section') + ' to ' + companyName(companyId) : 'Unassigned ' + plural(r.changed, 'section'))
+          + ' for ' + ACT_SHORT[act] + (r.unchanged ? ' (' + r.unchanged + ' unchanged).' : '.'), 'ok', 6000);
+        S.multiFresh = true; // keep the selection: the other activity can be assigned next
+        closeModal();
         return loadBootstrap().then(function () { refreshAll(); });
       })
       .catch(function (e) {
-        if (e.hint === 'assign_conflict') { showConflict(e, ids, companyId, area); return; }
+        if (e.hint === 'assign_conflict') { showConflict(e, ids, companyId, area, act); return; }
         if (e.hint !== 'session' && e.hint !== 'password') toast(e.message, 'err', 8000);
       });
   }
-  function showConflict(e, ids, companyId, area) {
+  function showConflict(e, ids, companyId, area, act) {
     var list = [];
     try { list = JSON.parse(e.details || '[]'); } catch (x) { list = []; }
     var byCo = new Map();
     list.forEach(function (c) { var k = c.company_id; if (!byCo.has(k)) byCo.set(k, []); byCo.get(k).push(c.code || '(no ID)'); });
     var conflictIds = new Set(list.map(function (c) { return c.section_id; }));
     var rest = ids.filter(function (id) { return !conflictIds.has(id); });
-    openModal('Some sections already have a contractor', [
-      h('p', { text: e.message + ' Nothing has been changed yet.' }),
+    openModal('Some sections already have a ' + ACT_SHORT[act] + ' contractor', [
+      h('p', { text: e.message + ' Nothing has been changed yet. The ' + ACT_SHORT[otherAct(act)] + ' assignments are not affected.' }),
       h('div', { class: 'stack' }, Array.from(byCo.entries()).map(function (en) {
         return h('div', null, cchip(en[0], ' · ' + en[1].length), h('div', { class: 'sel-list', text: en[1].slice(0, 30).join(', ') + (en[1].length > 30 ? ' …' : '') }));
       })),
       h('div', { class: 'btn-row' },
-        h('button', { type: 'button', class: 'btn primary', text: 'Reassign all ' + ids.length + ' to ' + companyName(companyId), onclick: function () { doAssign(ids, companyId, area, true); } }),
-        rest.length ? h('button', { type: 'button', class: 'btn', text: 'Assign only the other ' + rest.length, onclick: function () { doAssign(rest, companyId, area, false); } }) : null,
+        h('button', { type: 'button', class: 'btn primary', text: 'Reassign all ' + ids.length + ' to ' + companyName(companyId), onclick: function () { doAssign(ids, companyId, area, true, act); } }),
+        rest.length ? h('button', { type: 'button', class: 'btn', text: 'Assign only the other ' + rest.length, onclick: function () { doAssign(rest, companyId, area, false, act); } }) : null,
         h('button', { type: 'button', class: 'btn ghost', text: 'Cancel', onclick: closeModal }))]);
   }
   function confirmUnassign() {
-    var ids = Array.from(S.multi).filter(function (id) { return asgOf(id); });
-    openModal('Unassign ' + plural(ids.length, 'section') + '?', [
-      h('p', { text: 'They will show as Unassigned. Their installation statuses and history stay as they are. The change is recorded in the assignment log.' }),
+    var act = S.act;
+    var ids = Array.from(S.multi).filter(function (id) { return asgOf(id, act); });
+    openModal('Unassign ' + plural(ids.length, 'section') + ' from ' + ACT_SHORT[act] + '?', [
+      h('p', { text: 'They will show as Unassigned for ' + ACT[act] + '. Their ' + ACT_SHORT[otherAct(act)] + ' contractor, installation statuses and history stay as they are. The change is recorded in the assignment log.' }),
       h('div', { class: 'btn-row' },
-        h('button', { type: 'button', class: 'btn primary', text: 'Unassign', onclick: function () { doAssign(ids, null, '', true); } }),
+        h('button', { type: 'button', class: 'btn primary', text: 'Unassign', onclick: function () { doAssign(ids, null, '', true, act); } }),
         h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
 
@@ -980,7 +1110,7 @@
   }
 
   function renderDetails(P, s) {
-    var p = parentOf(s), sib = siblingOf(s), a = asgOf(s.id);
+    var p = parentOf(s), sib = siblingOf(s);
     var head = h('div', { class: 'panel-head' },
       h('div', null, h('h2', { text: 'Section' }), h('div', { class: 'panel-tid', text: s.code || 'NO ID' }),
         h('p', { class: 'panel-sub', text: (s.side ? SIDE_LABEL[s.side] + ' half' : 'Half outline') + ' of table ' + (p && p.code ? p.code : '(no ID)') + ' · Block ' + s.block + (s.is_active ? '' : ' · excluded') })),
@@ -988,13 +1118,18 @@
     var stack = h('div', { class: 'stack' }, head);
     if (sib) stack.append(h('div', { class: 'sibling' }, h('span', { text: 'Other half:' }),
       h('button', { type: 'button', class: 'link-btn tid', text: secLabel(sib), onclick: function () { selectSection(sib.id); } })));
-    stack.append(h('div', { class: 'sibling' }, h('span', { text: 'Contractor:' }), cchip(a && a.company_id),
-      a && a.area ? h('span', { class: 'small', text: '· ' + a.area }) : null));
+    if (!s.code) {
+      // no ID: no status cards, but show who is assigned (if anyone)
+      stack.append(h('div', { class: 'asg-mini' }, ACTS.map(function (act) {
+        var a = asgOf(s.id, act);
+        return h('div', { class: 'sibling' }, h('span', { text: ACT_SHORT[act] + ':' }), cchip(a && a.company_id));
+      })));
+    }
     stack.append(flagNotices(s));
     if (s.code) {
-      ACTS.forEach(function (act) { stack.append(actCard(s, act)); });
-      if (!canUpdate(s) && S.user.role !== 'viewer' && s.is_active) {
-        stack.append(h('p', { class: 'small muted', text: a ? 'Only ' + companyName(a.company_id) + ' accounts can update this section.' : 'This section is not assigned to your company. Ask the administrator.' }));
+      [S.act, otherAct(S.act)].forEach(function (act) { stack.append(actCard(s, act)); }); // activity on screen first
+      if (isSub() && s.is_active && !updatableActs(s).length) {
+        stack.append(h('p', { class: 'small muted', text: 'This section is not assigned to your company for either activity. Ask the administrator if this is wrong.' }));
       }
       stack.append(historyBox(s));
     }
@@ -1006,17 +1141,28 @@
     P.append(stack);
   }
 
+  // One card per activity: its own contractor, status and update button
   function actCard(s, act) {
-    var u = curOf(s.id, act), st = u ? u.status : 'not_started';
-    var card = h('section', { class: 'act-card', 'aria-label': ACT[act] }, h('h3', { text: ACT[act] }), h('div', null, chip(st)));
+    var u = curOf(s.id, act), st = u ? u.status : 'not_started', a = asgOf(s.id, act);
+    var card = h('section', { class: 'act-card' + (act === S.act ? ' is-current' : ''), 'aria-label': ACT[act], 'data-act': act },
+      h('h3', { text: ACT[act] }), h('div', null, chip(st)));
+    var kv = h('dl', { class: 'kv' },
+      h('dt', { text: 'Contractor' }), h('dd', { class: 'asg-dd' }, cchip(a && a.company_id)),
+      a && a.area ? [h('dt', { text: 'Area' }), h('dd', { text: a.area })] : null);
     if (u) {
-      card.append(h('dl', { class: 'kv' },
-        h('dt', { text: 'Company' }), h('dd', null, h('strong', { text: u.company_name })),
+      kv.append(
+        h('dt', { text: 'Saved for' }), h('dd', null, h('strong', { text: u.company_name })),
         h('dt', { text: 'Updated by' }), h('dd', { text: u.full_name ? u.full_name + ' (' + u.username + ')' : u.username }),
-        h('dt', { text: 'Date & time' }), h('dd', { text: fmtTime(u.created_at) }),
-        u.remarks ? [h('dt', { text: 'Remarks' }), h('dd', { text: u.remarks })] : null));
-    } else card.append(h('p', { class: 'small muted', text: 'No update recorded yet.' }));
-    if (canUpdate(s)) card.append(h('button', { type: 'button', class: 'btn primary small', text: 'Update status', onclick: function () { openForm(s, act); } }));
+        h('dt', { text: 'Date & time' }), h('dd', { text: fmtTime(u.created_at) }));
+      if (u.remarks) kv.append(h('dt', { text: 'Remarks' }), h('dd', { text: u.remarks }));
+    }
+    card.append(kv);
+    if (!u) card.append(h('p', { class: 'small muted', text: 'No update recorded yet.' }));
+    if (canUpdate(s, act)) {
+      card.append(h('button', { type: 'button', class: 'btn primary small', text: 'Update status', onclick: function () { openForm(s, act); } }));
+    } else if (isSub() && s.is_active) {
+      card.append(h('p', { class: 'small muted', text: a ? 'Only ' + companyName(a.company_id) + ' accounts can update this activity.' : 'Not assigned to your company for this activity.' }));
+    }
     return card;
   }
 
@@ -1044,9 +1190,9 @@
         }
         var a = it.a;
         return h('li', null,
-          h('div', { class: 'hist-top' }, h('strong', { text: 'Contractor' }),
+          h('div', { class: 'hist-top' }, h('strong', { text: 'Contractor · ' + (a.activity ? ACT_SHORT[a.activity] : 'both activities') }),
             h('span', { class: 'small', text: (a.prev_company_name || 'Unassigned') + ' → ' + (a.new_company_name || 'Unassigned') })),
-          h('div', { class: 'hist-meta', text: fmtTime(a.at) + ' · by ' + a.username + (a.new_area ? ' · area: ' + a.new_area : '') }));
+          h('div', { class: 'hist-meta', text: fmtTime(a.at) + ' · by ' + a.username + (a.new_area ? ' · area: ' + a.new_area : '') + (a.activity ? '' : ' · before activities were assigned separately') }));
       })));
     }
     return box;
@@ -1067,40 +1213,47 @@
 
   // ----- update form -----
   function openForm(s, act) {
-    if (!canUpdate(s)) return;
-    var u = curOf(s.id, act), a = asgOf(s.id);
+    if (!canUpdate(s, act)) return;
+    var u = curOf(s.id, act), a = asgOf(s.id, act);
     S.form = { sid: s.id, act: act, status: null, company: a ? a.company_id : null, remarks: '', base: u ? u.id : null, dirty: false };
     S.mode = 'form';
-    renderPanel();
+    if (S.act !== act) setAct(act); else renderPanel(); // keyplan shows the activity being updated
     if (window.innerWidth <= 900) ensureVisible(s);
   }
   function setFormAct(act) {
-    var f = S.form, u = curOf(f.sid, act);
-    f.act = act; f.base = u ? u.id : null;
-    if (S.disp !== act) setDisp(act); else renderPanel();
+    var f = S.form; if (!f) return;
+    var s = S.sections.get(f.sid);
+    if (!canUpdate(s, act)) return;
+    var u = curOf(f.sid, act), a = asgOf(f.sid, act);
+    f.act = act; f.base = u ? u.id : null; f.company = a ? a.company_id : null;
+    if (S.act !== act) setAct(act); else renderPanel();
   }
   function renderForm(P, s) {
-    var f = S.form, u = curOf(s.id, f.act), cur = u ? u.status : 'not_started', a = asgOf(s.id);
+    var f = S.form, u = curOf(s.id, f.act), cur = u ? u.status : 'not_started', a = asgOf(s.id, f.act);
     var head = h('div', { class: 'panel-head' },
       h('div', null, h('h2', { text: 'Update status' }), h('div', { class: 'panel-tid', text: s.code }),
         h('p', { class: 'panel-sub', text: SIDE_LABEL[s.side] + ' half of ' + parentOf(s).code + ' · Block ' + s.block })),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Cancel update', text: '×', onclick: cancelForm }));
-    var actPick = h('div', { class: 'act-pick', role: 'group', 'aria-label': 'Activity' }, ACTS.map(function (x) {
-      return h('button', { type: 'button', 'aria-pressed': String(f.act === x), text: ACT_SHORT[x], onclick: function () { setFormAct(x); } });
-    }));
+    var allowed = updatableActs(s);
+    var actPick = allowed.length > 1
+      ? h('div', { class: 'act-pick', role: 'group', 'aria-label': 'Activity' }, allowed.map(function (x) {
+        return h('button', { type: 'button', 'aria-pressed': String(f.act === x), text: ACT_SHORT[x], onclick: function () { setFormAct(x); } });
+      }))
+      : h('div', { class: 'act-fixed' }, h('strong', { text: ACT[f.act] }),
+        isSub() ? h('span', { class: 'small muted', text: ' · the activity assigned to your company' }) : null);
     var stPick = h('div', { class: 'status-pick', role: 'group', 'aria-label': 'New status' }, ST.map(function (st) {
       return h('button', { type: 'button', 'aria-pressed': String(f.status === st), onclick: function () { f.status = st; f.dirty = true; renderPanel(); } },
         h('span', { class: 'sw s-' + st }), ST_LABEL[st]);
     }));
     var coField;
-    if (a) {
-      coField = h('div', { class: 'field' }, h('span', { class: 'label', text: 'Responsible contractor (assigned)' }), h('div', null, cchip(a.company_id)));
+    if (a || !isAdmin()) {
+      coField = h('div', { class: 'field' }, h('span', { class: 'label', text: 'Responsible contractor (assigned for ' + ACT_SHORT[f.act] + ')' }), h('div', null, cchip(a && a.company_id)));
     } else {
       var companies = activeCompanies();
       var sel = h('select', { id: 'f-company', onchange: function (e) { f.company = e.target.value ? +e.target.value : null; f.dirty = true; renderPanel(); } },
         h('option', { value: '', text: companies.length ? 'Choose the company…' : 'No companies yet' }),
         companies.map(function (c) { return h('option', { value: c.id, text: c.name, selected: f.company === c.id }); }));
-      coField = h('div', { class: 'field' }, h('label', { for: 'f-company', text: 'Company responsible (section not assigned yet)' }), sel);
+      coField = h('div', { class: 'field' }, h('label', { for: 'f-company', text: 'Company responsible (no ' + ACT_SHORT[f.act] + ' contractor assigned yet)' }), sel);
     }
     var rem = h('textarea', { id: 'f-remarks', maxlength: 500, placeholder: 'Optional. For example: waiting for materials.' });
     rem.value = f.remarks;
@@ -1120,7 +1273,7 @@
   function cancelForm() { S.mode = 'details'; S.form = null; renderPanel(); }
 
   function renderConfirm(P, s) {
-    var f = S.form, u = curOf(s.id, f.act), cur = u ? u.status : 'not_started', a = asgOf(s.id);
+    var f = S.form, u = curOf(s.id, f.act), cur = u ? u.status : 'not_started', a = asgOf(s.id, f.act);
     var coId = a ? a.company_id : f.company;
     var same = u && u.status === f.status && u.company_id === coId;
     var btnSave = h('button', { type: 'button', class: 'btn primary', id: 'btn-save', text: 'Confirm and save', onclick: function () { saveUpdate(btnSave); } });
@@ -1146,7 +1299,7 @@
     btn.disabled = true; btn.textContent = 'Saving…';
     $$('#panel button').forEach(function (b) { b.disabled = true; });
     call('submit_update', {
-      p_section_id: s.id, p_activity: f.act, p_status: f.status, p_company_id: asgOf(s.id) ? null : f.company,
+      p_section_id: s.id, p_activity: f.act, p_status: f.status, p_company_id: asgOf(s.id, f.act) ? null : f.company,
       p_remarks: f.remarks.trim() || null, p_expected_update_id: f.base
     }).then(function (d) {
       var u = d.update;
@@ -1249,6 +1402,7 @@
     return call('get_changes', { p_since: S.serverTime }).then(function (d) {
       S.serverTime = d.server_time; S.lastSync = new Date(); S.syncErr = false;
       applyUser(d.user);
+      if (S.selected && S.history.get(S.selected) === 'error') loadHistory(S.selected, true);
       if (d.meta_version !== S.metaVersion) {
         return loadBootstrap().then(function () { refreshAll(); });
       }
@@ -1276,9 +1430,8 @@
   }
   function refreshAll() {
     if (S.page === 'keyplan') {
-      var keep = KP.svg && KP.block === S.block ? Object.assign({}, KP.view) : null;
-      buildKeyplan();
-      if (keep) { KP.fitToken = null; requestAnimationFrame(function () { setVB(keep); }); }
+      rebuildKeyplan();
+      if (S.selected) loadHistory(S.selected, true); // the reload emptied the history cache
       renderPanel();
     } else if (S.page === 'dashboard') renderDashboard();
     else if (S.page === 'admin') renderAdmin();
@@ -1301,17 +1454,23 @@
     root.textContent = '';
     var blocks = F.block === 'all' ? BLOCKS : [+F.block];
     var acts = F.act === 'all' ? ACTS : [F.act];
-    var inScope = allSections().filter(function (s) {
-      if (!counted(s) || blocks.indexOf(s.block) < 0) return false;
-      var a = asgOf(s.id);
+    var base = allSections().filter(function (s) { return counted(s) && blocks.indexOf(s.block) >= 0; });
+    // The contractor filter is applied per activity: a section can be in Alpha's
+    // Mounting Structure scope and in Bravo's PV Module scope at the same time.
+    function inFilter(s, act) {
+      var a = asgOf(s.id, act);
+      if (F.company === 'all') return true;
       if (F.company === 'none') return !a;
-      if (F.company !== 'all') return !!a && String(a.company_id) === F.company;
-      return true;
-    });
+      return !!a && String(a.company_id) === F.company;
+    }
+    var scope = {};
+    acts.forEach(function (act) { scope[act] = base.filter(function (s) { return inFilter(s, act); }); });
+    var coLabel = F.company === 'all' ? 'All contractors' : F.company === 'none' ? 'Unassigned sections' : companyName(+F.company);
+    var blkLabel = blocks.length === 2 ? 'Blocks 1 and 5' : 'Block ' + blocks[0];
 
     root.append(h('div', { class: 'page-head' },
       h('div', null, h('h1', { text: 'Project overview' }),
-        h('p', { text: 'Counts use West and East sections that have an ID in the drawing. A section with no saved update counts as Not Started.' })),
+        h('p', { text: 'Counts use West and East sections that have an ID in the drawing. A section with no saved update counts as Not Started. Each activity is counted on its own.' })),
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn small', text: 'Download current status (CSV)', onclick: exportCurrent }),
         h('button', { type: 'button', class: 'btn small', text: 'Download full history (CSV)', onclick: exportHistory }))));
@@ -1326,101 +1485,101 @@
       sel('f-act', 'Activity', F.act, [['all', 'Both activities'], ['mounting', ACT_SHORT.mounting], ['module', ACT_SHORT.module]], 'act'),
       sel('f-status', 'Status', F.status, [['all', 'All statuses']].concat(ST.map(function (s) { return [s, ST_LABEL[s]]; })), 'status'),
       sel('f-company', 'Contractor (assigned)', F.company, [['all', 'All contractors'], ['none', 'Unassigned']].concat(S.companies.map(function (c) { return [String(c.id), c.name + (c.is_active ? '' : ' (inactive)')]; })), 'company')),
-      h('p', { class: 'hint filters-note', text: 'The totals below follow the Block, Activity and Contractor filters. The Status filter narrows the section list.' })));
+      h('p', { class: 'hint filters-note', text: 'Scope, progress and remaining work are worked out separately for each activity, using that activity\'s contractor assignment. They follow the Block and Contractor filters. The Status filter narrows the section list.' })));
 
-    // KPIs
-    var counts = {}, tot = { ongoing: 0, on_hold: 0, completed: 0 };
-    acts.forEach(function (a) {
-      counts[a] = statusCounts(inScope, a);
-      tot.ongoing += counts[a].ongoing; tot.on_hold += counts[a].on_hold; tot.completed += counts[a].completed;
-    });
-    var nAct = inScope.length * acts.length;
-    var b1 = (S.secByBlock[1] || []).filter(counted).length, b5 = (S.secByBlock[5] || []).filter(counted).length;
-    var nid1 = (S.secByBlock[1] || []).filter(function (s) { return !s.code; }).length;
-    var nid5 = (S.secByBlock[5] || []).filter(function (s) { return !s.code; }).length;
-    var assigned = inScope.filter(function (s) { return asgOf(s.id); }).length;
-    function kpi(label, num, note, cls) {
-      return h('div', { class: 'kpi' + (cls ? ' ' + cls : '') }, h('div', { class: 'k-label', text: label }), h('div', { class: 'k-num' }, num), note ? h('div', { class: 'k-note', text: note }) : null);
+    function kpi(label, num, note, cls, key) {
+      return h('div', { class: 'kpi' + (cls ? ' ' + cls : ''), 'data-k': key || null }, h('div', { class: 'k-label', text: label }), h('div', { class: 'k-num' }, num), note ? h('div', { class: 'k-note', text: note }) : null);
     }
-    var today = new Date().toDateString(), todayN = 0;
-    inScope.forEach(function (s) { acts.forEach(function (a) { var u = curOf(s.id, a); if (u && new Date(u.created_at).toDateString() === today) todayN++; }); });
-    var kp = h('div', { class: 'kpis' },
-      kpi('Sections · Block 1', String(b1), nid1 ? nid1 + ' more outline' + (nid1 > 1 ? 's' : '') + ' without ID not counted' : 'All outlines have an ID'),
-      kpi('Sections · Block 5', String(b5), nid5 ? nid5 + ' more outline' + (nid5 > 1 ? 's' : '') + ' without ID not counted' : 'All outlines have an ID'),
-      kpi(F.company === 'all' ? 'Assigned to a contractor' : 'Sections in this filter', [String(F.company === 'all' ? assigned : inScope.length), h('small', { text: ' / ' + (F.company === 'all' ? inScope.length : (blocks.length === 2 ? b1 + b5 : (blocks[0] === 1 ? b1 : b5))) })], F.company === 'all' ? fmtPct(assigned, inScope.length) + ' of sections in view' : 'Sections assigned to the chosen contractor'),
-      kpi('Unassigned', String(inScope.length - assigned), 'Sections with no contractor yet'));
-    acts.forEach(function (a) {
-      kp.append(kpi(ACT_SHORT[a] + ' completed', [String(counts[a].completed), h('small', { text: ' / ' + inScope.length })], fmtPct(counts[a].completed, inScope.length) + ' of sections in view', 's-completed'));
+    // one summary per activity: scope, completed, remaining, updated today
+    var today = new Date().toDateString();
+    var sums = h('div', { class: 'act-sums' + (acts.length === 1 ? ' one' : '') });
+    acts.forEach(function (act) {
+      var list = scope[act], n = list.length, c = statusCounts(list, act);
+      var assigned = list.filter(function (s) { return asgOf(s.id, act); }).length;
+      var todayN = list.filter(function (s) { var u = curOf(s.id, act); return u && new Date(u.created_at).toDateString() === today; }).length;
+      var scopeNote = F.company === 'all' ? assigned + ' assigned · ' + (n - assigned) + ' unassigned'
+        : F.company === 'none' ? 'No ' + ACT_SHORT[act] + ' contractor yet' : 'Assigned to this contractor for ' + ACT_SHORT[act];
+      sums.append(h('section', { class: 'card act-sum', 'data-act': act, 'aria-label': ACT[act] },
+        h('div', { class: 'act-sum-head' }, h('h2', { text: ACT[act] }), h('span', { class: 'small muted', text: blkLabel + ' · ' + coLabel })),
+        h('div', { class: 'kpis' },
+          kpi('Scope', String(n), scopeNote, null, 'scope'),
+          kpi('Completed', [String(c.completed), h('small', { text: ' / ' + n })], fmtPct(c.completed, n) + ' of scope', 's-completed', 'completed'),
+          kpi('Remaining', [String(n - c.completed), h('small', { text: ' / ' + n })], 'Ongoing ' + c.ongoing + ' · On hold ' + c.on_hold + ' · Not started ' + c.not_started, 's-not_started', 'remaining'),
+          kpi('Updated today', String(todayN), 'Sections with a status saved today', null, 'today')),
+        statusBar(c, n)));
     });
-    kp.append(kpi('Ongoing activities', String(tot.ongoing), 'Sections × activities in progress', 's-ongoing'));
-    kp.append(kpi('Activities on hold', String(tot.on_hold), 'Sections × activities stopped or waiting', 's-on_hold'));
-    kp.append(kpi('Remaining activities', [String(nAct - tot.completed), h('small', { text: ' / ' + nAct })], 'Not yet completed (' + acts.length + ' activit' + (acts.length > 1 ? 'ies' : 'y') + ' × ' + inScope.length + ' sections)', 's-not_started'));
-    kp.append(kpi('Updated today', String(todayN), 'Sections × activities with a status saved today'));
-    var n = kp.children.length;
-    if (n % 4 === 2) { kp.children[n - 1].classList.add('span2'); kp.children[n - 2].classList.add('span2'); }
-    else if (n % 4 === 3) kp.children[n - 1].classList.add('span2');
-    else if (n % 4 === 1) { kp.children[n - 1].classList.add('span2'); kp.children[n - 2].classList.add('span2'); kp.children[n - 3].classList.add('span2'); }
-    root.append(kp);
+    root.append(sums);
 
-    // progress
+    // progress by block and activity (same scope rules)
     var prog = h('div', { class: 'prog' });
     blocks.forEach(function (b) {
-      var list = (S.secByBlock[b] || []).filter(counted);
-      acts.forEach(function (a) {
-        var c = statusCounts(list, a);
-        prog.append(h('div', { class: 'prog-row' },
-          h('div', { class: 'p-label', text: 'Block ' + b + ' · ' + ACT_SHORT[a] }), statusBar(c, list.length),
-          h('div', { class: 'p-nums' }, ST.map(function (s) { return h('span', { text: ST_LABEL[s] + ': ' + c[s] }); }),
+      acts.forEach(function (act) {
+        var list = scope[act].filter(function (s) { return s.block === b; });
+        var c = statusCounts(list, act);
+        prog.append(h('div', { class: 'prog-row', 'data-block': String(b), 'data-act': act },
+          h('div', { class: 'p-label', text: 'Block ' + b + ' · ' + ACT_SHORT[act] }), statusBar(c, list.length),
+          h('div', { class: 'p-nums' }, h('span', { text: 'Scope: ' + list.length }),
+            ST.map(function (s) { return h('span', { text: ST_LABEL[s] + ': ' + c[s] }); }),
+            h('span', { text: 'Remaining: ' + (list.length - c.completed) }),
             h('strong', { text: fmtPct(c.completed, list.length) + ' completed' }))));
       });
     });
-    root.append(h('div', { class: 'card' }, h('h2', { text: 'Progress' }),
+    var nid = { 1: 0, 5: 0 }, cnt = { 1: 0, 5: 0 };
+    BLOCKS.forEach(function (b) { (S.secByBlock[b] || []).forEach(function (s) { if (!s.code) nid[b]++; else if (s.is_active) cnt[b]++; }); });
+    var outlineNote = BLOCKS.map(function (b) {
+      return 'Block ' + b + ': ' + cnt[b] + ' sections' + (nid[b] ? ' (' + nid[b] + ' outline' + (nid[b] > 1 ? 's' : '') + ' without ID not counted)' : '');
+    }).join(' · ');
+    root.append(h('div', { class: 'card' }, h('h2', { text: 'Progress by block' }),
+      h('p', { class: 'card-sub', text: outlineNote }),
       h('div', { class: 'card-stack' },
         h('div', { class: 'legend-inline' }, ST.map(function (s) { return h('span', null, h('i', { class: 'sw s-' + s }), ST_LABEL[s]); })),
         prog)));
 
-    // contractors
+    // contractors: each activity has its own contractors
     var byCo = new Map();
-    inScope.forEach(function (s) {
-      var a = asgOf(s.id), key = a ? a.company_id : 0;
-      var row = byCo.get(key) || { n: 0, c: {} };
-      row.n++;
-      acts.forEach(function (act) { var k = act + '|' + statusOf(s.id, act); row.c[k] = (row.c[k] || 0) + 1; });
-      byCo.set(key, row);
+    acts.forEach(function (act) {
+      base.forEach(function (s) {
+        var a = asgOf(s.id, act), k = a ? a.company_id : 0;
+        var r = byCo.get(k); if (!r) { r = {}; byCo.set(k, r); }
+        var x = r[act] || (r[act] = { n: 0, c: { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 } });
+        x.n++; x.c[statusOf(s.id, act)]++;
+      });
     });
     var coKeys = Array.from(byCo.keys()).sort(function (x, y) { return x === 0 ? 1 : y === 0 ? -1 : companyName(x).localeCompare(companyName(y)); });
-    var coHead1 = h('tr', null, h('th', { rowspan: 2, text: 'Contractor' }), h('th', { rowspan: 2, class: 'num', text: 'Sections' }));
+    var coHead1 = h('tr', null, h('th', { rowspan: 2, text: 'Contractor' }));
     var coHead2 = h('tr');
+    var COLS = [['n', 'Sections'], ['completed', 'Completed'], ['ongoing', 'Ongoing'], ['on_hold', 'On hold'], ['rem', 'Remaining'], ['pct', '% done']];
     acts.forEach(function (a) {
-      coHead1.append(h('th', { colspan: 4, class: 'grp', text: ACT_SHORT[a] }));
-      ['completed', 'ongoing', 'on_hold'].forEach(function (s) { coHead2.append(h('th', { class: 'num', text: ST_LABEL[s] })); });
-      coHead2.append(h('th', { class: 'num', text: '% done' }));
+      coHead1.append(h('th', { colspan: COLS.length, class: 'grp', text: ACT_SHORT[a] }));
+      COLS.forEach(function (c, i) { coHead2.append(h('th', { class: 'num' + (i === 0 ? ' grp-start' : ''), text: c[1] })); });
     });
     var coBody = h('tbody');
     coKeys.forEach(function (k) {
       var r = byCo.get(k);
-      var tr = h('tr', null, h('td', null, cchip(k || null)), h('td', { class: 'num', text: String(r.n) }));
+      var tr = h('tr', { 'data-company': String(k) }, h('td', null, cchip(k || null)));
       acts.forEach(function (a) {
-        ['completed', 'ongoing', 'on_hold'].forEach(function (s) { tr.append(h('td', { class: 'num', text: String(r.c[a + '|' + s] || 0) })); });
-        tr.append(h('td', { class: 'num', text: fmtPct(r.c[a + '|completed'] || 0, r.n) }));
+        var x = r[a];
+        COLS.forEach(function (c, i) {
+          var v = !x ? '—' : c[0] === 'n' ? String(x.n) : c[0] === 'rem' ? String(x.n - x.c.completed)
+            : c[0] === 'pct' ? fmtPct(x.c.completed, x.n) : String(x.c[c[0]]);
+          tr.append(h('td', { class: 'num' + (i === 0 ? ' grp-start' : ''), 'data-col': a + '.' + c[0], text: v }));
+        });
       });
       if (F.company !== 'all' && String(k || 'none') !== F.company) tr.className = 'muted';
       coBody.append(tr);
     });
     root.append(h('div', { class: 'card' }, h('h2', { text: 'Contractors' }),
-      h('p', { class: 'card-sub', text: 'Sections assigned to each contractor and their installation status. Colours match the Contractors view of the keyplan.' }),
+      h('p', { class: 'card-sub', text: 'Each activity has its own contractors. Sections, progress and remaining work per contractor and activity. Colours match the Contractors view of the keyplan.' }),
       h('div', { class: 'table-wrap' }, h('table', { class: 'dtable co-table' }, h('thead', null, coHead1, coHead2), coBody))));
 
-    // filtered list
+    // filtered list (one row per section and activity)
     var rows = [];
-    inScope.forEach(function (s) {
-      var a = asgOf(s.id);
-      if (F.company === 'none' && a) return;
-      if (F.company !== 'all' && F.company !== 'none' && (!a || String(a.company_id) !== F.company)) return;
+    base.forEach(function (s) {
       acts.forEach(function (act) {
+        if (!inFilter(s, act)) return;
         var u = curOf(s.id, act), st = u ? u.status : 'not_started';
         if (F.status !== 'all' && st !== F.status) return;
-        rows.push({ s: s, a: act, u: u, st: st, asg: a });
+        rows.push({ s: s, a: act, u: u, st: st, asg: asgOf(s.id, act) });
       });
     });
     rows.sort(function (x, y) { return cmpSec(x.s, y.s) || ACTS.indexOf(x.a) - ACTS.indexOf(y.a); });
@@ -1431,8 +1590,8 @@
       body.append(h('tr', null,
         h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: r.s.code, title: 'Show on keyplan', onclick: function () { locate(r.s, r.a); } })),
         h('td', { class: 'nowrap', text: 'Block ' + r.s.block }),
-        h('td', null, cchip(r.asg && r.asg.company_id)),
         h('td', { class: 'nowrap', text: ACT_SHORT[r.a] }),
+        h('td', null, cchip(r.asg && r.asg.company_id)),
         h('td', null, chip(r.st)),
         h('td', { class: 'nowrap', text: r.u ? r.u.username : '—' }),
         h('td', { class: 'nowrap', text: r.u ? fmtTime(r.u.created_at) : '—' }),
@@ -1441,8 +1600,8 @@
     var listCard = h('div', { class: 'card' }, h('h2', { text: 'Sections matching the filters' }),
       h('p', { class: 'card-sub', text: rows.length + ' section-activit' + (rows.length === 1 ? 'y' : 'ies') + '. Select a section ID to show it on the keyplan.' }));
     if (rows.length) {
-      listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-        h('thead', null, h('tr', null, ['Section ID', 'Block', 'Contractor', 'Activity', 'Status', 'Updated by', 'Date & time', 'Remarks'].map(function (x) { return h('th', { text: x }); }))),
+      listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable', id: 'dash-list' },
+        h('thead', null, h('tr', null, ['Section ID', 'Block', 'Activity', 'Contractor', 'Status', 'Updated by', 'Date & time', 'Remarks'].map(function (x) { return h('th', { text: x }); }))),
         body)));
       if (pages > 1) listCard.append(h('div', { class: 'pager' },
         h('span', { text: 'Page ' + (F.page + 1) + ' of ' + pages }),
@@ -1481,7 +1640,9 @@
   }
   function locate(s, act, disp) {
     setPage('keyplan');
-    if (disp) setDisp(disp); else if (act && act !== S.disp && S.disp !== 'assign') setDisp(act);
+    if (S.pick) { S.pick = null; paintStatuses(); }
+    if (disp) setDisp(disp);
+    if (act) setAct(act);
     if (s.block !== S.block) setBlock(s.block);
     selectSection(s.id, { zoom: true });
   }
@@ -1508,17 +1669,20 @@
     return list;
   }
   function exportCurrent() {
-    var rows = [['Block', 'Section ID', 'Parent table ID', 'Side', 'In monitoring', 'Drawing note', 'Contractor', 'Area',
-      'Mounting Structure status', 'Mounting Structure company', 'Mounting Structure updated by', 'Mounting Structure updated at', 'Mounting Structure remarks',
-      'PV Module status', 'PV Module company', 'PV Module updated by', 'PV Module updated at', 'PV Module remarks']];
+    var head = ['Block', 'Section ID', 'Parent table ID', 'Side', 'In monitoring', 'Drawing note'];
+    ACTS.forEach(function (act) {
+      var n = ACT_SHORT[act];
+      head.push(n + ' contractor (assigned)', n + ' area', n + ' status', n + ' saved for company', n + ' updated by', n + ' updated at', n + ' remarks');
+    });
+    var rows = [head];
     sortedSections().forEach(function (s) {
-      var p = parentOf(s), a = asgOf(s.id);
+      var p = parentOf(s);
       var flags = (p.flags || []).concat(s.flags || []).map(function (f) { return FLAG_LABEL[f] || f; }).join('; ');
-      var r = [s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?', counted(s) ? 'Yes' : 'No', flags,
-        a ? companyName(a.company_id) : 'Unassigned', a ? a.area : ''];
+      var r = [s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?', counted(s) ? 'Yes' : 'No', flags];
       ACTS.forEach(function (act) {
-        var u = curOf(s.id, act);
-        r.push(counted(s) ? ST_LABEL[u ? u.status : 'not_started'] : '', u ? u.company_name : '', u ? u.username : '', u ? fmtTime(u.created_at) : '', u && u.remarks ? u.remarks : '');
+        var u = curOf(s.id, act), a = asgOf(s.id, act);
+        r.push(a ? companyName(a.company_id) : 'Unassigned', a ? a.area : '',
+          counted(s) ? ST_LABEL[u ? u.status : 'not_started'] : '', u ? u.company_name : '', u ? u.username : '', u ? fmtTime(u.created_at) : '', u && u.remarks ? u.remarks : '');
       });
       rows.push(r);
     });
@@ -1538,11 +1702,14 @@
       .then(function () { if (btn) { btn.disabled = false; btn.textContent = 'Download full history (CSV)'; } });
   }
   function exportAssignments() {
-    var rows = [['Block', 'Section ID', 'Parent table ID', 'Side', 'Contractor', 'Area', 'Assigned by', 'Assigned at']];
+    var rows = [['Block', 'Section ID', 'Parent table ID', 'Side', 'Activity', 'Contractor', 'Area', 'Assigned by', 'Assigned at']];
     sortedSections().forEach(function (s) {
-      var a = asgOf(s.id), p = parentOf(s);
-      rows.push([s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?',
-        a ? companyName(a.company_id) : 'Unassigned', a ? a.area : '', a ? a.assigned_by_name : '', a ? fmtTime(a.assigned_at) : '']);
+      var p = parentOf(s);
+      ACTS.forEach(function (act) {
+        var a = asgOf(s.id, act);
+        rows.push([s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?', ACT[act],
+          a ? companyName(a.company_id) : 'Unassigned', a ? a.area : '', a ? a.assigned_by_name : '', a ? fmtTime(a.assigned_at) : '']);
+      });
     });
     download('pv-contractor-assignments-' + stamp() + '.csv', rows);
   }
@@ -1622,11 +1789,19 @@
     var listCard = h('div', { class: 'card' }, h('h2', { text: 'Accounts' }));
     body.append(listCard);
     if (refetch || !A.users) {
-      listCard.append(h('p', { class: 'small muted', text: 'Loading accounts…' }));
-      call('admin_list_users').then(function (d) { A.users = d.users; if (S.page === 'admin' && A.tab === 'accounts') renderAdmin(false); })
-        .catch(function (e) { listCard.append(h('p', { class: 'form-error', text: e.message })); });
+      var loading = h('p', { class: 'small muted', text: 'Loading accounts…' });
+      listCard.append(loading);
+      // fill in only the list when it arrives, so that nothing typed in the form above is lost
+      call('admin_list_users').then(function (d) {
+        A.users = d.users;
+        if (listCard.isConnected) { loading.remove(); fillAccountList(listCard); }
+      }).catch(function (e) { loading.remove(); listCard.append(h('p', { class: 'form-error', text: e.message })); });
       return;
     }
+    fillAccountList(listCard);
+  }
+  function fillAccountList(listCard) {
+    var A = S.admin;
     listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
       h('thead', null, h('tr', null, ['Username', 'Name', 'Role', 'Company', 'Status', 'Last sign-in', ''].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, A.users.map(function (u) {
@@ -1718,15 +1893,21 @@
     });
     body.append(form);
     var use = new Map();
-    S.assign.forEach(function (a) { use.set(a.company_id, (use.get(a.company_id) || 0) + 1); });
+    S.assign.forEach(function (a) {
+      var s = S.sections.get(a.section_id); if (!s || !counted(s)) return;
+      var u = use.get(a.company_id) || { mounting: 0, module: 0 };
+      u[a.activity]++; use.set(a.company_id, u);
+    });
     var card = h('div', { class: 'card' }, h('h2', { text: 'Companies' }));
     if (!S.companies.length) card.append(h('div', { class: 'empty-state', text: 'No companies yet. Add the first one above.' }));
     else card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-      h('thead', null, h('tr', null, ['Company', 'Status', 'Assigned sections', ''].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['Company', 'Status', 'Mounting Structure sections', 'PV Module sections', ''].map(function (x, i) { return h('th', { class: i === 2 || i === 3 ? 'num' : null, text: x }); }))),
       h('tbody', null, S.companies.map(function (c) {
+        var u = use.get(c.id) || { mounting: 0, module: 0 };
         return h('tr', null, h('td', null, cchip(c.id)),
           h('td', null, h('span', { class: 'pill ' + (c.is_active ? 'on' : 'off'), text: c.is_active ? 'Active' : 'Inactive' })),
-          h('td', { class: 'num', text: String(use.get(c.id) || 0) }),
+          h('td', { class: 'num', text: String(u.mounting) }),
+          h('td', { class: 'num', text: String(u.module) }),
           h('td', { class: 'nowrap' }, h('div', { class: 'btn-row nowrap' },
             h('button', { type: 'button', class: 'btn small', text: 'Edit', onclick: function () { editCompany(c); } }),
             h('button', {
@@ -1734,7 +1915,7 @@
               onclick: function () { saveCompany(c, c.name, !c.is_active, c.color); }
             }))));
       })))));
-    card.append(h('p', { class: 'hint', text: 'A company with assigned sections cannot be deactivated until they are reassigned. Past records stay unchanged.' }));
+    card.append(h('p', { class: 'hint', text: 'A company with assigned sections (for either activity) cannot be deactivated until they are reassigned. Past records stay unchanged. Every active company has its own colour.' }));
     body.append(card);
   }
   function saveCompany(c, name, active, color) {
@@ -1745,13 +1926,19 @@
   }
   function editCompany(c) {
     var f = h('input', { id: 'rc-name', maxlength: 120 }); f.value = c.name;
-    var chosen = c.color;
+    var chosen = (c.color || '').toLowerCase();
     var pal = h('div', { class: 'palette', role: 'group', 'aria-label': 'Colour' });
+    var colours = PALETTE.slice();
+    if (chosen && colours.indexOf(chosen) < 0) colours.push(chosen); // keep a colour from an older palette selectable
     function drawPal() {
       pal.textContent = '';
-      PALETTE.forEach(function (col) {
+      colours.forEach(function (col) {
         var used = S.companies.filter(function (x) { return x.id !== c.id && x.is_active && (x.color || '').toLowerCase() === col; }).map(function (x) { return x.name; });
-        pal.append(h('button', { type: 'button', color: col, 'aria-pressed': String((chosen || '').toLowerCase() === col), 'aria-label': col + (used.length ? ' (used by ' + used.join(', ') + ')' : ''), title: used.length ? 'Also used by ' + used.join(', ') : 'Not used yet', onclick: function () { chosen = col; drawPal(); } }));
+        pal.append(h('button', {
+          type: 'button', color: col, 'aria-pressed': String(chosen === col), disabled: used.length > 0 && c.is_active,
+          'aria-label': col + (used.length ? ' (used by ' + used.join(', ') + ')' : ''), title: used.length ? 'Used by ' + used.join(', ') : 'Free',
+          onclick: function () { chosen = col; drawPal(); }
+        }));
       });
     }
     drawPal();
@@ -1759,7 +1946,7 @@
     save.addEventListener('click', function () { save.disabled = true; saveCompany(c, f.value, c.is_active, chosen).catch(function () { save.disabled = false; }); });
     openModal('Edit company', [h('div', { class: 'field' }, h('label', { for: 'rc-name', text: 'Company name' }), f),
       h('div', { class: 'field' }, h('span', { class: 'label', text: 'Colour on the keyplan (Contractors view)' }), pal,
-        h('p', { class: 'hint', text: 'Pick a colour no other active company uses, so each contractor stays easy to tell apart.' })),
+        h('p', { class: 'hint', text: 'Colours used by another active company are greyed out, so each contractor stays easy to tell apart in both activities.' })),
       h('p', { class: 'hint', text: 'A new name is shown everywhere, including earlier records by this company.' }),
       h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
@@ -1767,64 +1954,81 @@
   function renderAssignments(body, refetch) {
     var A = S.admin, F = A.afilter;
     var all = allSections();
-    var summary = new Map(), un = { 1: 0, 5: 0 };
+    // summary: sections per contractor, per activity and block
+    var summary = new Map(), un = { mounting: { 1: 0, 5: 0 }, module: { 1: 0, 5: 0 } };
     all.forEach(function (s) {
-      var a = asgOf(s.id);
-      if (!a) { un[s.block]++; return; }
-      var r = summary.get(a.company_id) || { b1: 0, b5: 0, areas: new Set() };
-      r['b' + s.block]++; if (a.area) r.areas.add(a.area);
-      summary.set(a.company_id, r);
+      if (!counted(s)) return; // same sections as the dashboard: with an ID and in monitoring
+      ACTS.forEach(function (act) {
+        var a = asgOf(s.id, act);
+        if (!a) { un[act][s.block]++; return; }
+        var r = summary.get(a.company_id) || { mounting: { 1: 0, 5: 0 }, module: { 1: 0, 5: 0 }, areas: new Set() };
+        r[act][s.block]++; if (a.area) r.areas.add(a.area);
+        summary.set(a.company_id, r);
+      });
     });
+    function nums(r) {
+      return [h('td', { class: 'num grp-start', text: String(r.mounting[1]) }), h('td', { class: 'num', text: String(r.mounting[5]) }),
+        h('td', { class: 'num grp-start', text: String(r.module[1]) }), h('td', { class: 'num', text: String(r.module[5]) })];
+    }
     var sumBody = h('tbody');
     Array.from(summary.keys()).sort(function (x, y) { return companyName(x).localeCompare(companyName(y)); }).forEach(function (cid) {
       var r = summary.get(cid);
-      sumBody.append(h('tr', null, h('td', null, cchip(cid)), h('td', { class: 'num', text: String(r.b1) }), h('td', { class: 'num', text: String(r.b5) }),
+      sumBody.append(h('tr', { 'data-company': String(cid) }, h('td', null, cchip(cid)), nums(r),
         h('td', { class: 'small', text: Array.from(r.areas).sort().join(', ') || '—' }),
         h('td', { class: 'nowrap' }, h('button', { type: 'button', class: 'btn small', text: 'Show on keyplan', onclick: function () { showCompanyOnKeyplan(cid); } }))));
     });
-    sumBody.append(h('tr', null, h('td', null, cchip(null)), h('td', { class: 'num', text: String(un[1]) }), h('td', { class: 'num', text: String(un[5]) }), h('td', { text: '' }), h('td', { text: '' })));
+    sumBody.append(h('tr', { 'data-company': 'none' }, h('td', null, cchip(null)), nums(un), h('td', { text: '' }), h('td', { text: '' })));
     body.append(h('div', { class: 'card' }, h('h2', { text: 'Assignments by contractor' }),
-      h('p', { class: 'card-sub', text: 'To assign: open the keyplan, choose the Contractors view, then select sections by tapping or drawing an area.' }),
+      h('p', { class: 'card-sub', text: 'Each activity is assigned separately: a section can have one contractor for Mounting Structure and another for PV Module. To assign, open the keyplan Contractors view, choose the activity, then tap sections or draw an area.' }),
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn primary small', text: 'Open the Contractors view', onclick: function () { S.highlight = null; setPage('keyplan'); setDisp('assign'); setPick('area'); } }),
         h('button', { type: 'button', class: 'btn small', text: 'Download assignments (CSV)', onclick: exportAssignments })),
-      h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-        h('thead', null, h('tr', null, ['Contractor', 'Block 1', 'Block 5', 'Areas', ''].map(function (x, i) { return h('th', { class: i === 1 || i === 2 ? 'num' : null, text: x }); }))), sumBody))));
+      h('div', { class: 'table-wrap' }, h('table', { class: 'dtable co-table', id: 'asg-summary' },
+        h('thead', null,
+          h('tr', null, h('th', { rowspan: 2, text: 'Contractor' }), h('th', { colspan: 2, class: 'grp', text: 'Mounting Structure' }),
+            h('th', { colspan: 2, class: 'grp', text: 'PV Module' }), h('th', { rowspan: 2, text: 'Areas' }), h('th', { rowspan: 2, text: '' })),
+          h('tr', null, ['Block 1', 'Block 5', 'Block 1', 'Block 5'].map(function (x, i) { return h('th', { class: 'num' + (i % 2 === 0 ? ' grp-start' : ''), text: x }); }))),
+        sumBody))));
 
-    // list with filters
-    var areas = new Set(); S.assign.forEach(function (a) { if (a.area) areas.add(a.area); });
+    // list with filters: one row per section and activity
+    var areas = areaNames();
     function fsel(id, label, val, opts, key) {
       return h('div', { class: 'field' }, h('label', { for: id, text: label }),
         h('select', { id: id, onchange: function (e) { F[key] = e.target.value; F.page = 0; renderAdmin(); } },
           opts.map(function (o) { return h('option', { value: o[0], text: o[1], selected: String(val) === String(o[0]) }); })));
     }
-    var rows = all.filter(function (s) {
-      var a = asgOf(s.id);
-      if (F.block !== 'all' && String(s.block) !== F.block) return false;
-      if (F.company === 'none') { if (a) return false; } else if (F.company !== 'all' && (!a || String(a.company_id) !== F.company)) return false;
-      if (F.area !== 'all' && (!a || a.area !== F.area)) return false;
-      return true;
-    }).sort(cmpSec);
+    var acts = F.act === 'all' ? ACTS : [F.act];
+    var rows = [];
+    all.slice().sort(cmpSec).forEach(function (s) {
+      if (F.block !== 'all' && String(s.block) !== F.block) return;
+      acts.forEach(function (act) {
+        var a = asgOf(s.id, act);
+        if (F.company === 'none') { if (a) return; } else if (F.company !== 'all' && (!a || String(a.company_id) !== F.company)) return;
+        if (F.area !== 'all' && (!a || a.area !== F.area)) return;
+        rows.push({ s: s, act: act, a: a });
+      });
+    });
     var per = 50, pages = Math.max(1, Math.ceil(rows.length / per));
     if (F.page >= pages) F.page = pages - 1;
     var lb = h('tbody');
-    rows.slice(F.page * per, F.page * per + per).forEach(function (s) {
-      var a = asgOf(s.id);
+    rows.slice(F.page * per, F.page * per + per).forEach(function (r) {
+      var a = r.a;
       lb.append(h('tr', null,
-        h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: secLabel(s), onclick: function () { locate(s, null, 'assign'); } })),
-        h('td', { class: 'nowrap', text: 'Block ' + s.block }), h('td', null, cchip(a && a.company_id)),
+        h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: secLabel(r.s), onclick: function () { locate(r.s, r.act, 'assign'); } })),
+        h('td', { class: 'nowrap', text: 'Block ' + r.s.block }), h('td', { class: 'nowrap', text: ACT_SHORT[r.act] }), h('td', null, cchip(a && a.company_id)),
         h('td', { text: a && a.area ? a.area : '—' }), h('td', { class: 'nowrap', text: a ? a.assigned_by_name : '—' }),
         h('td', { class: 'nowrap', text: a ? fmtTime(a.assigned_at) : '—' })));
     });
-    var listCard = h('div', { class: 'card' }, h('h2', { text: 'Sections' }),
+    var listCard = h('div', { class: 'card' }, h('h2', { text: 'Sections and activities' }),
       h('div', { class: 'filters' },
         fsel('af-block', 'Block', F.block, [['all', 'Both blocks'], ['1', 'Block 1'], ['5', 'Block 5']], 'block'),
+        fsel('af-act', 'Activity', F.act, [['all', 'Both activities'], ['mounting', ACT_SHORT.mounting], ['module', ACT_SHORT.module]], 'act'),
         fsel('af-company', 'Contractor', F.company, [['all', 'All'], ['none', 'Unassigned']].concat(S.companies.map(function (c) { return [String(c.id), c.name]; })), 'company'),
-        fsel('af-area', 'Area', F.area, [['all', 'All areas']].concat(Array.from(areas).sort().map(function (a) { return [a, a]; })), 'area')),
-      h('p', { class: 'small muted list-count', text: rows.length + ' sections' }));
+        fsel('af-area', 'Area', F.area, [['all', 'All areas']].concat(areas.map(function (a) { return [a, a]; })), 'area')),
+      h('p', { class: 'small muted list-count', text: rows.length + ' section-activit' + (rows.length === 1 ? 'y' : 'ies') }));
     if (rows.length) {
-      listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-        h('thead', null, h('tr', null, ['Section ID', 'Block', 'Contractor', 'Area', 'Assigned by', 'Assigned on'].map(function (x) { return h('th', { text: x }); }))), lb)));
+      listCard.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable', id: 'asg-list' },
+        h('thead', null, h('tr', null, ['Section ID', 'Block', 'Activity', 'Contractor', 'Area', 'Assigned by', 'Assigned on'].map(function (x) { return h('th', { text: x }); }))), lb)));
       if (pages > 1) listCard.append(h('div', { class: 'pager' }, h('span', { text: 'Page ' + (F.page + 1) + ' of ' + pages }),
         h('div', { class: 'btn-row' },
           h('button', { type: 'button', class: 'btn small', text: '← Previous', disabled: F.page === 0, onclick: function () { F.page--; renderAdmin(); } }),
@@ -1833,7 +2037,7 @@
     body.append(listCard);
 
     var logCard = h('div', { class: 'card' }, h('h2', { text: 'Assignment changes' }),
-      h('p', { class: 'card-sub', text: 'Every assignment, reassignment and unassignment, with the previous contractor, the administrator and the date. Newest first.' }));
+      h('p', { class: 'card-sub', text: 'Every assignment, reassignment and unassignment, with the activity, the previous contractor, the administrator and the date. Newest first.' }));
     body.append(logCard);
     if (refetch || !A.log) {
       logCard.append(h('p', { class: 'small muted', text: 'Loading…' }));
@@ -1842,23 +2046,29 @@
       return;
     }
     if (!A.log.length) { logCard.append(h('div', { class: 'empty-state', text: 'No assignments made yet.' })); return; }
-    logCard.append(h('ul', { class: 'asg-log' }, A.log.map(function (b) {
+    logCard.append(h('ul', { class: 'asg-log', id: 'asg-log' }, A.log.map(function (b) {
       var prev = Object.keys(b.prev || {}).map(function (k) { return k + ': ' + b.prev[k]; }).join(' · ');
-      return h('li', null,
-        h('div', { class: 'sibling' }, h('strong', { text: fmtTime(b.at) }), h('span', { text: '· by ' + b.username })),
+      return h('li', { 'data-act': b.activity || 'both' },
+        h('div', { class: 'sibling' }, h('strong', { text: fmtTime(b.at) }), h('span', { text: '· by ' + b.username }),
+          h('span', { class: 'pill act', text: b.activity ? ACT_SHORT[b.activity] : 'Both activities (before update 3)' })),
         h('div', { class: 'sibling' }, h('span', { text: (b.new_company_id ? 'Assigned ' : 'Unassigned ') + plural(b.count, 'section') + (b.new_company_id ? ' to' : '') }),
           b.new_company_id ? cchip(b.new_company_id) : null, b.new_area ? h('span', { class: 'small', text: '· area: ' + b.new_area }) : null),
         h('div', { class: 'small muted', text: 'Before: ' + prev }),
         h('div', { class: 'sel-list', text: (b.codes || []).join(', ') + (b.count > (b.codes || []).length ? ' …' : '') }));
     })));
   }
+  // Highlight one contractor's sections on the keyplan (Contractors view). The highlight
+  // follows the activity selector, so both of its scopes can be checked.
   function showCompanyOnKeyplan(cid) {
-    var ids = new Set(); var blocks = { 1: 0, 5: 0 };
-    S.assign.forEach(function (a, sid) { if (a.company_id === cid) { ids.add(sid); var s = S.sections.get(sid); if (s) blocks[s.block]++; } });
-    S.highlight = ids;
-    setPage('keyplan'); setDisp('assign');
-    if (blocks[S.block] === 0 && blocks[S.block === 1 ? 5 : 1] > 0) setBlock(S.block === 1 ? 5 : 1); else paintStatuses();
-    toast('Showing ' + companyName(cid) + '. Tap Show all in the panel to clear.', 'ok', 5000);
+    var cnt = { mounting: { 1: 0, 5: 0 }, module: { 1: 0, 5: 0 } };
+    S.assign.forEach(function (a) { if (a.company_id === cid) { var s = S.sections.get(a.section_id); if (s) cnt[a.activity][s.block]++; } });
+    var act = S.act;
+    if (!cnt[act][1] && !cnt[act][5] && (cnt[otherAct(act)][1] || cnt[otherAct(act)][5])) act = otherAct(act);
+    S.highlight = { cid: cid };
+    setPage('keyplan'); setDisp('assign'); setAct(act);
+    var ob = S.block === 1 ? 5 : 1;
+    if (!cnt[act][S.block] && cnt[act][ob]) setBlock(ob); else paintStatuses();
+    toast('Showing ' + companyName(cid) + ' · ' + ACT_SHORT[act] + '. Switch the activity to see its other scope. Show all clears it.', 'ok', 6000);
     renderPanel();
   }
 
@@ -1979,18 +2189,18 @@
   }
   function showHelp() {
     openModal('How to use the keyplan', [
-      h('p', { class: 'small', text: 'Every table is split into a West (W, left) and an East (E, right) section, for example M01-R02-T20W and M01-R02-T20E. Each section has its own statuses, contractor and history.' }),
+      h('p', { class: 'small', text: 'Every table is split into a West (W, left) and an East (E, right) section, for example M01-R02-T20W and M01-R02-T20E. Each section has, for each activity, its own contractor, status and history.' }),
       h('ol', { class: 'steps' },
         h('li', { text: 'Choose Block 1 or Block 5 at the top.' }),
-        h('li', { text: 'Choose what the colours show: Contractors (who is responsible), Mounting Structure or PV Module (progress).' }),
+        h('li', { text: 'Choose what the colours show: Contractors (who is responsible) or Status (progress), and the activity: Mounting Structure or PV Module.' }),
         h('li', { text: 'Find the section: zoom in (pinch or scroll) and tap it, or type its ID in the search box. Tapping only selects it; nothing is saved.' }),
-        h('li', { text: 'Press Update status, choose the activity and the new status. The contractor comes from the assignment. Add a remark if needed.' }),
+        h('li', { text: 'Press Update status on the activity card and choose the new status. The contractor comes from that activity\'s assignment. Add a remark if needed.' }),
         h('li', { text: 'Press Review update, check the summary, then press Confirm and save. Wait for the green “Saved” message.' })),
       h('div', { class: 'summary-grid' }, ST.map(function (s) {
         var d = { not_started: 'Work not started (or nothing recorded yet)', ongoing: 'Work in progress', completed: 'Work finished', on_hold: 'Work stopped or waiting' }[s];
         return [h('span', { class: 'sw s-' + s }), h('strong', { text: ST_LABEL[s] }), h('span', { class: 'small muted', text: d })];
       })),
-      h('p', { class: 'small', text: 'Subcontractors can update only the sections assigned to their company. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
+      h('p', { class: 'small', text: 'Subcontractors can update only the sections and the activity assigned to their company: a Mounting Structure assignment does not allow PV Module updates, and the other way round. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
       h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' })]);
   }
   function openChangePassword() {
@@ -2017,8 +2227,7 @@
     var tok = S.token;
     stopPolling();
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
-    S.selected = null; S.mode = 'details'; S.form = null; S.admin.users = null; S.admin.log = null;
-    S.multi.clear(); S.pick = null; S.highlight = null;
+    resetScreenState();
     if (tok) rpc('logout', { p_token: tok }).catch(function () { /* already invalid */ });
     $('#user-pop').hidden = true;
     showLogin();
@@ -2071,6 +2280,7 @@
     $$('.tab').forEach(function (b) { b.addEventListener('click', function () { if (b.dataset.view !== 'keyplan') S.highlight = null; setPage(b.dataset.view); }); });
     $$('#seg-block button').forEach(function (b) { b.addEventListener('click', function () { setBlock(+b.dataset.block); }); });
     $$('#seg-view button').forEach(function (b) { b.addEventListener('click', function () { setDisp(b.dataset.disp); }); });
+    $$('#seg-act button').forEach(function (b) { b.addEventListener('click', function () { setAct(b.dataset.act); if (isSub() && S.scopeOnly && S.page === 'keyplan') fitScope(true); }); });
     $('#btn-scope').addEventListener('click', function () {
       S.scopeOnly = !S.scopeOnly; renderToolbar(); paintStatuses(); renderPanel();
       if (S.scopeOnly) fitScope(true);
