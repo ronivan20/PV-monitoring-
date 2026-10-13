@@ -5,7 +5,11 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 4;
+  var DB_VERSION = 5;
+  var CCI = ['not_inspected', 'in_progress', 'pending_approval', 'approved', 'rejected', 'reinspection'];
+  var CCI_LABEL = { not_inspected: 'Not Yet Inspected', in_progress: 'Inspection in Progress', pending_approval: 'Inspected – Pending Approval',
+    approved: 'Approved by CCI', rejected: 'Rejected / Rectification Required', reinspection: 'For Reinspection' };
+  var RFI_SUGGEST = ['#e11d48', '#0ea5e9', '#8b5cf6', '#f97316', '#14b8a6', '#a16207', '#ec4899', '#4f46e5', '#65a30d', '#0f172a', '#db2777', '#0891b2'];
   var ACT = { mounting: 'Mounting Structure Installation', module: 'PV Module Installation' };
   var ACT_SHORT = { mounting: 'Mounting Structure', module: 'PV Module' };
   var ACT_TINY = { mounting: 'Mounting', module: 'PV Module' };
@@ -168,6 +172,7 @@
     page: 'keyplan', block: 1, disp: 'status', act: 'mounting', selected: null, mode: 'details', form: null,
     scopeOnly: true, pick: null, multi: new Set(), multiFresh: false, highlight: null, firstFit: true,
     bulk: false, bulkStatus: null, bulkRemarks: '', siteDate: null, myTarget: null,
+    q: { cats: [], cci: new Map(), rfis: [], rfiById: new Map(), rfiBySec: new Map(), statuses: new Map(), canCci: false }, rfiFocus: null,
     tgt: { from: null, to: null, company: 'all', act: 'all', block: 'all', data: null, loading: false },
     dash: { block: 'all', act: 'all', status: 'all', company: 'all', page: 0 },
     admin: { tab: 'accounts', users: null, log: null, reviewAll: false, afilter: { block: 'all', act: 'all', company: 'all', area: 'all', page: 0 } }
@@ -313,6 +318,19 @@
       S.multi.forEach(function (id) { if (!S.sections.has(id)) S.multi.delete(id); });
       applyUser(d.user);
       KP.stale = true; // rebuild the keyplan with the new data; the zoom and position are kept
+    }).then(loadQuality);
+  }
+  function loadQuality() {
+    return rpc('get_quality', { p_token: S.token }).then(function (d) {
+      var Q = S.q;
+      Q.canCci = !!d.can_record_cci; Q.cats = d.categories || [];
+      Q.cci = new Map(); (d.cci || []).forEach(function (r) { Q.cci.set(r.section_id + '|' + (r.activity || 'both'), r); });
+      Q.statuses = new Map(); (d.rfi_statuses || []).forEach(function (x) { Q.statuses.set(x.id, x); });
+      Q.rfis = d.rfis || []; Q.rfiById = new Map(); Q.rfiBySec = new Map();
+      Q.rfis.forEach(function (r) {
+        Q.rfiById.set(r.id, r);
+        r.section_ids.forEach(function (sid) { var l = Q.rfiBySec.get(sid) || []; l.push(r); Q.rfiBySec.set(sid, l); });
+      });
     });
   }
 
@@ -391,7 +409,8 @@
   }
   // what the colours show: contractors or installation status
   function setDisp(d) {
-    if (d === S.disp || (d !== 'assign' && d !== 'status')) return;
+    if (d === S.disp || ['assign', 'status', 'cci', 'rfi'].indexOf(d) < 0) return;
+    S.rfiFocus = null;
     S.disp = d; savePrefs({ disp: d });
     S.pick = null; S.multi.clear(); S.multiFresh = false; S.bulk = false;
     renderToolbar(); paintStatuses(); renderPanel();
@@ -405,7 +424,8 @@
     renderToolbar(); paintStatuses(); renderPanel();
   }
   function modeLabel() {
-    return (S.disp === 'assign' ? 'Contractors · ' : 'Status · ') + ACT[S.act];
+    if (S.disp === 'rfi') return 'RFIs';
+    return (S.disp === 'assign' ? 'Contractors · ' : S.disp === 'cci' ? 'CCI inspection · ' : 'Status · ') + ACT[S.act];
   }
 
   // ------------------------------------------------------------------
@@ -474,6 +494,7 @@
 
   // S.highlight = { cid }: show one contractor's sections for the activity on screen
   function dimmed(s) {
+    if (S.disp === 'rfi' && S.rfiFocus) return !rfisOf(s.id).some(function (r) { return r.id === S.rfiFocus; });
     if (S.highlight) { var a = asgOf(s.id, S.act); return !(a && a.company_id === S.highlight.cid); }
     if (isSub() && S.scopeOnly) return !inMyScope(s, S.act);
     return false;
@@ -483,6 +504,10 @@
     if (S.disp === 'assign') {
       c += asgOf(s.id, S.act) ? ' asg' : ' unasg';
       if (!s.code) c += ' noid-o';
+    } else if (S.disp === 'cci') {
+      if (!s.code) c += ' noid'; else { var q = cciOf(s.id, S.act); c += ' q-' + (q ? q.status : 'not_inspected'); }
+    } else if (S.disp === 'rfi') {
+      var rl = rfisOf(s.id); c += rl.length ? ' rfi' + (rl.length > 1 ? ' rfi-multi' : '') : ' norfi';
     } else if (!s.code) c += ' noid';
     else if (!s.is_active) c += ' off';
     else c += ' s-' + statusOf(s.id, S.act);
@@ -494,6 +519,8 @@
   function paintStatuses() {
     if (!KP.svg) return;
     KP.svg.classList.toggle('v-assign', S.disp === 'assign');
+    KP.svg.classList.toggle('v-cci', S.disp === 'cci');
+    KP.svg.classList.toggle('v-rfi', S.disp === 'rfi');
     KP.svg.classList.toggle('picking', S.pick === 'tap');
     KP.svg.classList.toggle('area-mode', S.pick === 'area');
     KP.svg.setAttribute('aria-label', 'Keyplan Block ' + S.block + ' · ' + modeLabel());
@@ -501,7 +528,8 @@
       var g = KP.groups.get(s.id); if (!g) return;
       g.setAttribute('class', secClass(s));
       var a = asgOf(s.id, S.act);
-      if (a) g.style.setProperty('--c', colorOf(a.company_id)); else g.style.removeProperty('--c');
+      if (S.disp === 'rfi') { var rl = rfisOf(s.id); if (rl.length) g.style.setProperty('--c', rl[0].color); else g.style.removeProperty('--c'); }
+      else if (a) g.style.setProperty('--c', colorOf(a.company_id)); else g.style.removeProperty('--c');
     });
     renderLegend();
     drawSelMarker();
@@ -773,6 +801,24 @@
       rows.push({ sw: function () { return h('span', { class: 'sw unasg' }); }, label: 'Unassigned', n: un });
       return { rows: rows, total: list.length, kind: 'Contractors', note: 'who is responsible, not progress', foot: ['Assigned', fmtPct(list.length - un, list.length)] };
     }
+    if (S.disp === 'cci') {
+      var qc = {}, qt = 0; CCI.forEach(function (k) { qc[k] = 0; });
+      list.forEach(function (s) { if (!s.code) { noid++; return; } if (!s.is_active) return; qt++; var q = cciOf(s.id, S.act); qc[q ? q.status : 'not_inspected']++; });
+      CCI.forEach(function (k) { rows.push({ sw: function () { return h('span', { class: 'sw q-' + k }); }, label: CCI_LABEL[k], n: qc[k] }); });
+      if (noid) rows.push({ sw: function () { return h('span', { class: 'sw noid' }); }, label: 'No section ID', n: noid });
+      return { rows: rows, total: qt, kind: 'CCI inspection', note: isSub() ? 'your assigned sections' : '', foot: ['Approved by CCI', fmtPct(qc.approved, qt)] };
+    }
+    if (S.disp === 'rfi') {
+      var byR = new Map(), none = 0, multi = 0;
+      list.forEach(function (s) { var rl = rfisOf(s.id); if (!rl.length) none++; if (rl.length > 1) multi++; rl.forEach(function (r) { byR.set(r.id, (byR.get(r.id) || 0) + 1); }); });
+      S.q.rfis.filter(function (r) { return byR.has(r.id); }).forEach(function (r) {
+        var st = S.q.statuses.get(r.status_id);
+        rows.push({ sw: function () { return h('span', { class: 'sw c', color: r.color }); }, label: r.rfi_no + ' · ' + (st ? st.name : ''), n: byR.get(r.id) });
+      });
+      if (multi) rows.push({ sw: function () { return h('span', { class: 'sw rfi-multi-sw' }); }, label: 'Sections with 2+ RFIs (tap to see all)', n: multi });
+      rows.push({ sw: function () { return h('span', { class: 'sw unasg' }); }, label: 'No RFI', n: none });
+      return { rows: rows, total: list.length, kind: 'RFIs', note: 'colour = RFI number; status in text', foot: ['With an RFI', fmtPct(list.length - none, list.length)] };
+    }
     var c = { not_started: 0, ongoing: 0, completed: 0, on_hold: 0 }, total = 0;
     list.forEach(function (s) { if (!s.code) { noid++; return; } if (!s.is_active) return; total++; c[statusOf(s.id, S.act)]++; });
     ST.forEach(function (st) { rows.push({ sw: function () { return h('span', { class: 'sw s-' + st }); }, label: ST_LABEL[st], n: c[st] }); });
@@ -789,13 +835,13 @@
     tb.append(h('div', { class: 'tb-head' },
       h('div', { class: 'tb-blk', text: 'Block ' + S.block }),
       h('div', { class: 'tnum', text: L.total + ' sections' }),
-      h('div', { class: 'tb-act' }, h('strong', { text: L.kind }), ' · ' + ACT[S.act], L.note ? h('span', { class: 'tb-note', text: L.note }) : null)),
+      h('div', { class: 'tb-act' }, h('strong', { text: L.kind }), S.disp === 'rfi' ? '' : ' · ' + ACT[S.act], L.note ? h('span', { class: 'tb-note', text: L.note }) : null)),
       rows,
       h('div', { class: 'tb-foot' }, h('span', { text: L.foot[0] }), h('strong', { class: 'tnum', text: L.foot[1] })));
     var strip = $('#legend-strip');
     if (strip) {
       strip.textContent = '';
-      strip.append(h('span', { class: 'ls-title', text: 'B' + S.block + ' · ' + ACT_TINY[S.act] + (S.disp === 'assign' ? ' contractors' : ' status') }));
+      strip.append(h('span', { class: 'ls-title', text: 'B' + S.block + ' · ' + (S.disp === 'rfi' ? '' : ACT_TINY[S.act]) + (S.disp === 'assign' ? ' contractors' : S.disp === 'cci' ? ' CCI' : S.disp === 'rfi' ? ' RFIs' : ' status') }));
       L.rows.forEach(function (r) { strip.append(h('span', { class: 'ls-item' }, r.sw(), r.label + ' ', h('b', { text: String(r.n) }))); });
     }
   }
@@ -851,7 +897,7 @@
     var s = S.sections.get(S.selected);
     var tools = S.disp === 'assign' && canAssign() && (S.pick || S.multi.size);
     // phones: the panel is a bottom sheet; only short content may grow without a height limit
-    P.classList.toggle('collapsed', !s && !S.highlight && !S.bulk && !(S.disp === 'assign' && canAssign()));
+    P.classList.toggle('collapsed', !s && !S.highlight && !S.bulk && !(S.disp === 'assign' && canAssign()) && !(S.disp === 'cci' && S.q.canCci) && !(S.disp === 'rfi' && isAdmin()));
     if (S.highlight) {
       var hn = (S.secByBlock[S.block] || []).filter(function (x) { var a = asgOf(x.id, S.act); return a && a.company_id === S.highlight.cid; }).length;
       P.append(h('div', { class: 'notice info sibling' }, cchip(S.highlight.cid),
@@ -873,6 +919,9 @@
       else renderDetails(P, s);
     } else if (S.disp === 'assign' && canAssign()) renderAssignTools(P);
     else if (S.bulk) renderBulkTools(P);
+    else if (S.disp === 'cci' && S.q.canCci) renderCciTools(P);
+    else if (S.disp === 'rfi' && isAdmin()) renderRfiTools(P);
+    else if (S.disp === 'cci' || S.disp === 'rfi') renderQualitySummary(P);
     else renderPanelSummary(P);
     if (S.mode === 'details') P.scrollTop = keepScroll;
   }
@@ -1146,8 +1195,10 @@
       })));
     }
     stack.append(flagNotices(s));
+    var rcard = rfiCard(s); if (rcard) stack.append(rcard);
     if (s.code) {
       [S.act, otherAct(S.act)].forEach(function (act) { stack.append(actCard(s, act)); }); // activity on screen first
+      var qcard = cciCard(s); if (qcard) stack.append(qcard);
       if (isSub() && s.is_active && !updatableActs(s).length) {
         stack.append(h('p', { class: 'small muted', text: 'This section is not assigned to your company for either activity. Ask the administrator if this is wrong.' }));
       }
@@ -1499,6 +1550,7 @@
         h('button', { type: 'button', class: 'btn small', text: 'Download full history (CSV)', onclick: exportHistory }))));
     if (isSub()) { var big = todayTargetCard(false); if (big) root.append(big); }
     root.append(renderTargetBoard());
+    root.append(renderCciBoard(blocks, F));
 
     function sel(id, label, value, options, key) {
       return h('div', { class: 'field' }, h('label', { for: id, text: label }),
@@ -2094,6 +2146,365 @@
         h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
 
+  // ------------------------------------------------------------------
+  // CCI inspection and approval, RFIs
+  // ------------------------------------------------------------------
+  // latest CCI record for a section and activity (a record for both activities counts for each)
+  function cciOf(sid, act) {
+    var a = S.q.cci.get(sid + '|' + act), b = S.q.cci.get(sid + '|both');
+    if (a && b) return a.id > b.id ? a : b;
+    return a || b || null;
+  }
+  function rfisOf(sid) { return S.q.rfiBySec.get(sid) || []; }
+  function qchip(st) { return h('span', { class: 'chip q-' + st, text: CCI_LABEL[st] }); }
+  function rfiChip(r) {
+    var st = S.q.statuses.get(r.status_id);
+    return h('span', { class: 'cchip' }, h('i', { class: 'cdot', color: r.color }), h('span', { text: r.rfi_no + (st ? ' · ' + st.name : '') }));
+  }
+  function qualityRefresh() { return loadBootstrap().then(function () { refreshAll(); }); }
+
+  function selTools(stack, note) {
+    stack.append(h('div', { class: 'tool-row' },
+      h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'tap'), text: 'Tap to select', onclick: function () { setPick(S.pick === 'tap' ? null : 'tap'); } }),
+      h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'area'), text: 'Draw an area', onclick: function () { setPick(S.pick === 'area' ? null : 'area'); } })),
+      h('p', { class: 'mode-note', text: S.pick === 'area' ? 'Drag a box on the keyplan; every section whose centre is inside is added.' : S.pick === 'tap' ? 'Tap sections to add or remove them.' : note }));
+    var sel = Array.from(S.multi).map(function (id) { return S.sections.get(id); }).filter(Boolean).sort(cmpSec);
+    stack.append(h('div', { class: 'sel-count', text: sel.length ? plural(sel.length, 'section') + ' selected' : 'No sections selected' }));
+    if (sel.length) stack.append(h('div', { class: 'sel-list', text: sel.slice(0, 60).map(secLabel).join(', ') + (sel.length > 60 ? ' …' : '') }));
+    return sel;
+  }
+  function renderCciTools(P) {
+    var stack = h('div', { class: 'stack' }, h('div', null, h('h2', { text: 'CCI inspection · Block ' + S.block }),
+      h('p', { class: 'panel-sub', text: 'Colours show the CCI status for ' + ACT[S.act] + '. Select sections to record an inspection or approval result.' })));
+    var sel = selTools(stack, 'Choose a selection tool, or tap a section without one to see its CCI history.');
+    if (sel.length) {
+      var ok = sel.filter(function (x) { return x.code && x.is_active; });
+      if (ok.length < sel.length) stack.append(h('p', { class: 'small muted', text: (sel.length - ok.length) + ' selected without an ID are left out.' }));
+      stack.append(h('div', { class: 'tool-row' },
+        h('button', { type: 'button', class: 'btn primary', id: 'btn-cci-record', text: 'Record CCI result for ' + plural(ok.length, 'section'), disabled: !ok.length, onclick: function () { openCciForm(ok); } }),
+        h('button', { type: 'button', class: 'btn ghost', text: 'Clear selection', onclick: function () { S.multi.clear(); paintStatuses(); renderPanel(); } })));
+    }
+    stack.append(cciNeedsAction((S.secByBlock[S.block] || []).filter(counted), 8));
+    P.append(stack);
+  }
+  function openCciForm(list, pre) {
+    var F = pre || { act: S.act, status: '', insp: S.siteDate || '', appr: '', rein: '', cc: [], ic: [], com: '', iss: '', rem: '', ca: '' };
+    function field(id, label, el) { return h('div', { class: 'field' }, h('label', { for: id, text: label }), el); }
+    var fAct = h('select', { id: 'q-act' }, [['mounting', ACT.mounting], ['module', ACT.module], ['both', 'Both activities']].map(function (o) { return h('option', { value: o[0], text: o[1], selected: F.act === o[0] }); }));
+    var fSt = h('select', { id: 'q-st' }, [h('option', { value: '', text: 'Choose…' })].concat(CCI.map(function (k) { return h('option', { value: k, text: CCI_LABEL[k], selected: F.status === k }); })));
+    function dateEl(id, v) { return h('input', { id: id, type: 'date', value: v || '' }); }
+    var fI = dateEl('q-insp', F.insp), fA = dateEl('q-appr', F.appr), fR = dateEl('q-rein', F.rein);
+    function catBox(kind, chosen) {
+      var cats = S.q.cats.filter(function (c) { return c.kind === kind && c.is_active; });
+      if (!cats.length) return h('p', { class: 'small muted', text: 'No ' + kind + ' categories yet. Add them in Admin → CCI & RFI.' });
+      return h('div', { class: 'cat-pick', 'data-kind': kind }, cats.map(function (c) {
+        return h('label', { class: 'check' }, h('input', { type: 'checkbox', value: c.name, checked: chosen.indexOf(c.name) >= 0 }), h('span', { text: c.name }));
+      }));
+    }
+    function ta(id, v, ph) { var t = h('textarea', { id: id, maxlength: 2000, rows: 2, placeholder: ph || '' }); t.value = v || ''; return t; }
+    var fCom = ta('q-com', F.com), fIss = ta('q-iss', F.iss), fRem = ta('q-rem', F.rem, 'Your remarks and technical details'), fCa = ta('q-ca', F.ca);
+    var cc = catBox('comment', F.cc), ic = catBox('issue', F.ic);
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    function read() {
+      F.act = fAct.value; F.status = fSt.value; F.insp = fI.value; F.appr = fA.value; F.rein = fR.value;
+      F.cc = $$('input:checked', cc).map(function (x) { return x.value; }); F.ic = $$('input:checked', ic).map(function (x) { return x.value; });
+      F.com = fCom.value.trim(); F.iss = fIss.value.trim(); F.rem = fRem.value.trim(); F.ca = fCa.value.trim();
+    }
+    var next = h('button', { type: 'button', class: 'btn primary', id: 'btn-cci-review', text: 'Review' });
+    next.addEventListener('click', function () {
+      read(); err.hidden = true;
+      var msg = !F.status ? 'Choose the CCI status.' : F.status === 'approved' && !F.appr ? 'Enter the CCI approval date.'
+        : ['pending_approval', 'approved', 'rejected', 'reinspection'].indexOf(F.status) >= 0 && !F.insp ? 'Enter the inspection date.'
+        : F.status === 'rejected' && !F.ca ? 'Describe the required corrective action.' : '';
+      if (msg) { err.textContent = msg; err.hidden = false; return; }
+      confirmCci(list, F);
+    });
+    openModal('Record CCI result · ' + plural(list.length, 'section'), [
+      h('p', { class: 'small', text: 'Official CCI result, recorded by you. Installation statuses are not changed.' }),
+      h('div', { class: 'grid-form' }, field('q-act', 'Activity', fAct), field('q-st', 'CCI status', fSt)),
+      h('div', { class: 'grid-form' }, field('q-insp', 'Inspection date', fI), field('q-appr', 'Approval date', fA), field('q-rein', 'Reinspection date', fR)),
+      h('div', { class: 'field' }, h('span', { class: 'label', text: 'CCI comment categories' }), cc),
+      field('q-com', 'CCI comments', fCom),
+      h('div', { class: 'field' }, h('span', { class: 'label', text: 'Issue / defect categories' }), ic),
+      field('q-iss', 'Identified issues or defects', fIss),
+      field('q-rem', 'Administrator remarks and technical details', fRem),
+      field('q-ca', 'Required corrective action', fCa), err,
+      h('div', { class: 'btn-row' }, next, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function confirmCci(list, F) {
+    var btn = h('button', { type: 'button', class: 'btn primary', id: 'btn-cci-confirm', text: 'Confirm and save ' + plural(list.length, 'record') });
+    btn.addEventListener('click', function () {
+      btn.disabled = true; btn.textContent = 'Saving…';
+      call('record_cci', { p_section_ids: list.map(function (x) { return x.id; }), p_activity: F.act === 'both' ? null : F.act, p_status: F.status,
+        p_inspection_date: F.insp || null, p_approval_date: F.appr || null, p_reinspection_date: F.rein || null,
+        p_comment_categories: F.cc, p_issue_categories: F.ic, p_cci_comments: F.com || null, p_issues: F.iss || null,
+        p_admin_remarks: F.rem || null, p_corrective_action: F.ca || null })
+        .then(function (r) { closeModal(); toast('CCI result saved for ' + plural(r.saved, 'section') + '.', 'ok', 6000); S.multi.clear(); return qualityRefresh(); })
+        .catch(function (e) { btn.disabled = false; btn.textContent = 'Confirm and save'; if (e.hint !== 'session') toast(e.message, 'err', 8000); });
+    });
+    function row(k, v) { return v ? [h('dt', { text: k }), h('dd', null, v)] : null; }
+    openModal('Confirm CCI result', [
+      h('dl', { class: 'confirm-dl' },
+        row('Activity', F.act === 'both' ? 'Both activities' : ACT[F.act]), row('CCI status', qchip(F.status)),
+        row('Sections', String(list.length)), row('Inspection date', F.insp && fmtDate(F.insp)), row('Approval date', F.appr && fmtDate(F.appr)),
+        row('Reinspection date', F.rein && fmtDate(F.rein)), row('Comment categories', F.cc.join(', ')), row('CCI comments', F.com),
+        row('Issue categories', F.ic.join(', ')), row('Issues', F.iss), row('Remarks', F.rem), row('Corrective action', F.ca)),
+      h('div', { class: 'sel-list bulk-ids', text: list.map(secLabel).join(', ') }),
+      h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Back', onclick: function () { openCciForm(list, F); } }))]);
+  }
+  // sections that need action: rectification or reinspection
+  function cciNeedsAction(list, max) {
+    var rows = [];
+    list.forEach(function (x) {
+      ACTS.forEach(function (act) {
+        var q = cciOf(x.id, act);
+        if (q && (q.status === 'rejected' || q.status === 'reinspection') && !rows.some(function (r) { return r.q.id === q.id; })) rows.push({ s: x, q: q });
+      });
+    });
+    var box = h('div', { class: 'stack cci-action' }, h('h3', { text: 'Needs action (' + rows.length + ')' }));
+    if (!rows.length) { box.append(h('p', { class: 'small muted', text: 'No section is waiting for rectification or reinspection.' })); return box; }
+    rows.sort(function (a, b) { return cmpSec(a.s, b.s); }).slice(0, max || 1000).forEach(function (r) {
+      box.append(h('div', { class: 'cci-act-row' },
+        h('button', { type: 'button', class: 'link-btn tid', text: secLabel(r.s), onclick: function () { locate(r.s, r.q.activity || S.act); } }),
+        qchip(r.q.status), h('span', { class: 'small', text: (r.q.activity ? ACT_SHORT[r.q.activity] : 'Both activities') + (r.q.corrective_action ? ' · ' + r.q.corrective_action : '') + (r.q.reinspection_date ? ' · reinspection ' + fmtDate(r.q.reinspection_date) : '') })));
+    });
+    if (max && rows.length > max) box.append(h('p', { class: 'small muted', text: (rows.length - max) + ' more on the Dashboard.' }));
+    return box;
+  }
+  function renderRfiTools(P) {
+    var stack = h('div', { class: 'stack' }, h('div', null, h('h2', { text: 'RFIs · Block ' + S.block }),
+      h('p', { class: 'panel-sub', text: 'Each colour is one RFI number. Select sections, then link or unlink an RFI. Create RFIs in Admin → CCI & RFI.' })));
+    var sel = selTools(stack, 'Choose a selection tool, or tap a section to see its RFIs.');
+    if (sel.length) {
+      var rs = h('select', { id: 'rfi-pick' }, [h('option', { value: '', text: S.q.rfis.length ? 'Choose the RFI…' : 'No RFIs yet' })].concat(S.q.rfis.map(function (r) {
+        var st = S.q.statuses.get(r.status_id); return h('option', { value: r.id, text: r.rfi_no + ' · ' + r.subject.slice(0, 40) + (st ? ' (' + st.name + ')' : '') });
+      })));
+      function go(link) {
+        if (!rs.value) { toast('Choose the RFI first.', 'err'); return; }
+        call('admin_link_rfi', { p_rfi_id: +rs.value, p_section_ids: sel.map(function (x) { return x.id; }), p_link: link })
+          .then(function (r) { toast((link ? 'Linked ' : 'Unlinked ') + plural(r.changed, 'section') + '.', 'ok'); S.multi.clear(); return qualityRefresh(); })
+          .catch(function (e) { toast(e.message, 'err', 8000); });
+      }
+      stack.append(h('div', { class: 'field' }, h('label', { for: 'rfi-pick', text: 'RFI' }), rs),
+        h('div', { class: 'tool-row' },
+          h('button', { type: 'button', class: 'btn primary', id: 'btn-rfi-link', text: 'Link to selected', onclick: function () { go(true); } }),
+          h('button', { type: 'button', class: 'btn', text: 'Unlink', onclick: function () { go(false); } }),
+          h('button', { type: 'button', class: 'btn ghost', text: 'Clear selection', onclick: function () { S.multi.clear(); paintStatuses(); renderPanel(); } })));
+    }
+    if (S.rfiFocus) stack.append(h('div', { class: 'notice info sibling' }, rfiChip(S.q.rfiById.get(S.rfiFocus)), h('button', { type: 'button', class: 'btn small', text: 'Show all RFIs', onclick: function () { S.rfiFocus = null; paintStatuses(); renderPanel(); } })));
+    P.append(stack);
+  }
+  function renderQualitySummary(P) {
+    var list = (S.secByBlock[S.block] || []).filter(counted);
+    if (isSub()) list = list.filter(function (x) { return asgOf(x.id, 'mounting') && asgOf(x.id, 'mounting').company_id === S.user.company_id || asgOf(x.id, 'module') && asgOf(x.id, 'module').company_id === S.user.company_id; });
+    var stack = h('div', { class: 'stack' });
+    if (S.disp === 'cci') {
+      stack.append(h('h2', { text: (isSub() ? 'Your sections · ' : '') + 'CCI · ' + ACT_SHORT[S.act] + ' · Block ' + S.block }));
+      var c = {}; CCI.forEach(function (k) { c[k] = 0; });
+      list.forEach(function (x) { var q = cciOf(x.id, S.act); c[q ? q.status : 'not_inspected']++; });
+      stack.append(h('div', { class: 'summary-grid' }, CCI.map(function (k) { return [h('span', { class: 'sw q-' + k }), h('span', { text: CCI_LABEL[k] }), h('span', { class: 'num', text: String(c[k]) })]; })));
+      stack.append(cciNeedsAction(list, 10));
+      stack.append(h('p', { class: 'small muted', text: 'CCI results are recorded by the administrator. Tap a section to see its comments and corrective actions.' }));
+    } else {
+      stack.append(h('h2', { text: 'RFIs · Block ' + S.block }));
+      var ids = new Set(); list.forEach(function (x) { rfisOf(x.id).forEach(function (r) { ids.add(r.id); }); });
+      var rl = S.q.rfis.filter(function (r) { return ids.has(r.id); });
+      if (!rl.length) stack.append(h('p', { class: 'small muted', text: 'No RFIs on ' + (isSub() ? 'your sections in ' : '') + 'this block.' }));
+      rl.forEach(function (r) { stack.append(h('div', { class: 'rfi-line' }, rfiChip(r), h('span', { class: 'small', text: r.subject }))); });
+    }
+    P.append(stack);
+  }
+  function cciCard(s) {
+    if (isSub() && !(asgOf(s.id, 'mounting') && asgOf(s.id, 'mounting').company_id === S.user.company_id) && !(asgOf(s.id, 'module') && asgOf(s.id, 'module').company_id === S.user.company_id)) return null;
+    var card = h('section', { class: 'act-card cci-card', 'aria-label': 'CCI inspection' }, h('h3', { text: 'CCI inspection and approval' }));
+    [S.act, otherAct(S.act)].forEach(function (act) {
+      var q = cciOf(s.id, act);
+      var kv = h('dl', { class: 'kv' }, h('dt', { text: ACT_SHORT[act] }), h('dd', null, qchip(q ? q.status : 'not_inspected')));
+      if (q) {
+        if (!q.activity) kv.append(h('dt', { text: 'Applies to' }), h('dd', { text: 'Both activities' }));
+        if (q.inspection_date) kv.append(h('dt', { text: 'Inspected' }), h('dd', { text: fmtDate(q.inspection_date) }));
+        if (q.approval_date) kv.append(h('dt', { text: 'Approved' }), h('dd', { text: fmtDate(q.approval_date) }));
+        if (q.reinspection_date) kv.append(h('dt', { text: 'Reinspection' }), h('dd', { text: fmtDate(q.reinspection_date) }));
+        var cats = (q.comment_categories || []).concat(q.issue_categories || []);
+        if (cats.length) kv.append(h('dt', { text: 'Categories' }), h('dd', { text: cats.join(', ') }));
+        if (q.cci_comments) kv.append(h('dt', { text: 'CCI comments' }), h('dd', { text: q.cci_comments }));
+        if (q.issues) kv.append(h('dt', { text: 'Issues' }), h('dd', { text: q.issues }));
+        if (q.corrective_action) kv.append(h('dt', { text: 'Corrective action' }), h('dd', null, h('strong', { text: q.corrective_action })));
+        if (q.admin_remarks) kv.append(h('dt', { text: 'Remarks' }), h('dd', { text: q.admin_remarks }));
+        kv.append(h('dt', { text: 'Recorded' }), h('dd', { text: fmtTime(q.created_at) + ' by ' + q.username }));
+      }
+      card.append(kv);
+    });
+    card.append(h('div', { class: 'btn-row' },
+      h('button', { type: 'button', class: 'btn small', text: 'CCI history', onclick: function () { showCciHistory(s); } }),
+      S.q.canCci && s.code && s.is_active ? h('button', { type: 'button', class: 'btn small', text: 'Record CCI result', onclick: function () { openCciForm([s]); } }) : null));
+    return card;
+  }
+  function showCciHistory(s) {
+    call('get_section_quality', { p_section_id: s.id }).then(function (d) {
+      openModal('CCI history · ' + secLabel(s), [
+        d.cci_history.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+          h('thead', null, h('tr', null, ['Recorded', 'Activity', 'Status', 'Dates', 'Comments / issues', 'Corrective action', 'By'].map(function (x) { return h('th', { text: x }); }))),
+          h('tbody', null, d.cci_history.map(function (q) {
+            return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(q.created_at) }), h('td', { text: q.activity ? ACT_SHORT[q.activity] : 'Both' }),
+              h('td', null, qchip(q.status), q.prev_status ? h('div', { class: 'small muted', text: 'was ' + CCI_LABEL[q.prev_status] }) : null),
+              h('td', { class: 'small', text: [q.inspection_date && 'Insp. ' + q.inspection_date, q.approval_date && 'Appr. ' + q.approval_date, q.reinspection_date && 'Reinsp. ' + q.reinspection_date].filter(Boolean).join(' · ') }),
+              h('td', { class: 'small', text: [(q.comment_categories || []).concat(q.issue_categories || []).join(', '), q.cci_comments, q.issues, q.admin_remarks].filter(Boolean).join(' — ') }),
+              h('td', { class: 'small', text: q.corrective_action || '' }), h('td', { text: q.username }));
+          })))) : h('p', { text: 'No CCI record yet.' }),
+        h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', text: 'Close', onclick: closeModal }))]);
+    }).catch(function (e) { toast(e.message, 'err'); });
+  }
+  function rfiCard(s) {
+    var rl = rfisOf(s.id); if (!rl.length) return null;
+    var card = h('section', { class: 'act-card rfi-card', 'aria-label': 'RFIs' }, h('h3', { text: plural(rl.length, 'RFI') }));
+    rl.forEach(function (r) {
+      card.append(h('div', { class: 'rfi-item' }, rfiChip(r),
+        h('p', { class: 'small', text: (r.discipline ? r.discipline + ' · ' : '') + r.subject }),
+        h('p', { class: 'small muted', text: [r.date_raised && 'Raised ' + fmtDate(r.date_raised), r.date_resolved && 'Resolved ' + fmtDate(r.date_resolved)].filter(Boolean).join(' · ') }),
+        r.remarks ? h('p', { class: 'small', text: r.remarks }) : null,
+        h('button', { type: 'button', class: 'link-btn', text: 'RFI history', onclick: function () { showRfiHistory(r); } })));
+    });
+    return card;
+  }
+  function showRfiHistory(r) {
+    call('get_rfi_history', { p_rfi_id: r.id }).then(function (d) {
+      function describe(l) {
+        if (l.action === 'linked' || l.action === 'unlinked') return (l.action === 'linked' ? 'Linked ' : 'Unlinked ') + (l.details.sections || []).join(', ');
+        if (l.action === 'created') return 'Created';
+        var b = l.details.before || {}, a = l.details.after || {}, out = [];
+        ['rfi_no', 'subject', 'discipline', 'date_raised', 'date_resolved', 'remarks', 'color'].forEach(function (k) { if (String(b[k] || '') !== String(a[k] || '')) out.push(k.replace('_', ' ') + ': ' + (b[k] || '—') + ' → ' + (a[k] || '—')); });
+        if (b.status_id !== a.status_id) { var x = S.q.statuses.get(b.status_id), y = S.q.statuses.get(a.status_id); out.unshift('status: ' + (x ? x.name : '?') + ' → ' + (y ? y.name : '?')); }
+        return out.join('; ') || 'Saved without changes';
+      }
+      openModal('RFI history · ' + r.rfi_no, [
+        h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+          h('thead', null, h('tr', null, ['When', 'Change', 'By'].map(function (x) { return h('th', { text: x }); }))),
+          h('tbody', null, d.log.map(function (l) { return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(l.at) }), h('td', { class: 'small', text: describe(l) }), h('td', { text: l.username })); })))),
+        h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', text: 'Close', onclick: closeModal }))]);
+    }).catch(function (e) { toast(e.message, 'err'); });
+  }
+  // dashboard: CCI per activity and the open RFIs
+  function renderCciBoard(blocks, F) {
+    var card = h('div', { class: 'card cci-board' }, h('h2', { text: isSub() ? 'CCI inspection of your sections' : 'CCI inspection and approval' }));
+    var base = allSections().filter(function (x) { return counted(x) && blocks.indexOf(x.block) >= 0; });
+    var acts = F.act === 'all' ? ACTS : [F.act];
+    var t = h('table', { class: 'dtable' }, h('thead', null, h('tr', null, [h('th', { text: 'Activity' })].concat(CCI.map(function (k) { return h('th', { class: 'num', text: CCI_LABEL[k] }); })))));
+    var tb = h('tbody'); t.append(tb);
+    var scopeAll = [];
+    acts.forEach(function (act) {
+      var list = base.filter(function (x) {
+        var a = asgOf(x.id, act);
+        if (isSub()) return a && a.company_id === S.user.company_id;
+        if (F.company === 'all') return true; if (F.company === 'none') return !a; return a && String(a.company_id) === F.company;
+      });
+      list.forEach(function (x) { if (scopeAll.indexOf(x) < 0) scopeAll.push(x); });
+      var c = {}; CCI.forEach(function (k) { c[k] = 0; });
+      list.forEach(function (x) { var q = cciOf(x.id, act); c[q ? q.status : 'not_inspected']++; });
+      tb.append(h('tr', null, [h('td', { text: ACT_SHORT[act] })].concat(CCI.map(function (k) { return h('td', { class: 'num', text: String(c[k]) }); }))));
+    });
+    card.append(h('div', { class: 'table-wrap' }, t), cciNeedsAction(scopeAll, 0));
+    var open = S.q.rfis.filter(function (r) { var st = S.q.statuses.get(r.status_id); return !(st && st.is_closed) && r.section_ids.some(function (id) { return scopeAll.some(function (x) { return x.id === id; }); }); });
+    card.append(h('h3', { text: 'Open RFIs (' + open.length + ')' }));
+    open.forEach(function (r) { card.append(h('div', { class: 'rfi-line' }, rfiChip(r), h('span', { class: 'small', text: r.subject + ' · ' + plural(r.section_ids.length, 'section') }))); });
+    return card;
+  }
+  // administrator: categories, RFI statuses and RFIs
+  function renderQualityAdmin(body) {
+    var catCard = h('div', { class: 'card' }, h('h2', { text: 'CCI comment and issue categories' }),
+      h('p', { class: 'card-sub', text: 'Configurable options for recording CCI results. None are filled in for you: add the categories your project inspections use.' }));
+    ['comment', 'issue'].forEach(function (kind) {
+      var inp = h('input', { id: 'cat-new-' + kind, maxlength: 120, placeholder: kind === 'comment' ? 'New comment category' : 'New issue / defect category' });
+      var add = h('button', { type: 'button', class: 'btn small', text: 'Add', onclick: function () {
+        call('admin_save_cci_category', { p_id: null, p_kind: kind, p_name: inp.value, p_is_active: true })
+          .then(function () { toast('Category added.', 'ok'); return qualityRefresh(); }).catch(function (e) { toast(e.message, 'err'); });
+      } });
+      var list = h('div', { class: 'cat-list' }, S.q.cats.filter(function (c) { return c.kind === kind; }).map(function (c) {
+        return h('div', { class: 'cat-row' + (c.is_active ? '' : ' off') }, h('span', { text: c.name + (c.is_active ? '' : ' (not offered)') }),
+          h('button', { type: 'button', class: 'link-btn', text: 'Rename', onclick: function () {
+            var n = h('input', { id: 'cat-rn', maxlength: 120, value: c.name });
+            openModal('Rename category', [h('div', { class: 'field' }, h('label', { for: 'cat-rn', text: 'Name' }), n), h('div', { class: 'btn-row' },
+              h('button', { type: 'button', class: 'btn primary', text: 'Save', onclick: function () {
+                call('admin_save_cci_category', { p_id: c.id, p_kind: kind, p_name: n.value, p_is_active: c.is_active }).then(function () { closeModal(); return qualityRefresh(); }).catch(function (e) { toast(e.message, 'err'); });
+              } }), h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+          } }),
+          h('button', { type: 'button', class: 'link-btn', text: c.is_active ? 'Stop offering' : 'Offer again', onclick: function () {
+            call('admin_save_cci_category', { p_id: c.id, p_kind: kind, p_name: c.name, p_is_active: !c.is_active }).then(qualityRefresh).catch(function (e) { toast(e.message, 'err'); });
+          } }));
+      }));
+      catCard.append(h('h3', { text: kind === 'comment' ? 'Comment categories' : 'Issue / defect categories' }), list, h('div', { class: 'tool-row' }, inp, add));
+    });
+    body.append(catCard);
+    // RFIs
+    var rfiCardEl = h('div', { class: 'card' }, h('h2', { text: 'RFIs' }),
+      h('p', { class: 'card-sub', text: 'Each RFI number gets its own colour on the RFI keyplan view. Link sections from Keyplan → RFI. The colour shows the RFI number; its status is shown as text.' }),
+      h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn primary', id: 'btn-rfi-new', text: 'New RFI', onclick: function () { rfiForm(null); } })));
+    if (S.q.rfis.length) {
+      rfiCardEl.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+        h('thead', null, h('tr', null, ['RFI', 'Status', 'Discipline', 'Subject', 'Raised', 'Resolved', 'Sections', ''].map(function (x) { return h('th', { text: x }); }))),
+        h('tbody', null, S.q.rfis.map(function (r) {
+          var st = S.q.statuses.get(r.status_id);
+          return h('tr', null, h('td', null, h('span', { class: 'cchip' }, h('i', { class: 'cdot', color: r.color }), h('span', { text: r.rfi_no }))),
+            h('td', { text: st ? st.name : '' }), h('td', { text: r.discipline || '—' }), h('td', { text: r.subject }),
+            h('td', { class: 'nowrap', text: r.date_raised || '—' }), h('td', { class: 'nowrap', text: r.date_resolved || '—' }), h('td', { class: 'num', text: String(r.section_ids.length) }),
+            h('td', { class: 'nowrap' },
+              h('button', { type: 'button', class: 'link-btn', text: 'Edit', onclick: function () { rfiForm(r); } }), ' ',
+              h('button', { type: 'button', class: 'link-btn', text: 'History', onclick: function () { showRfiHistory(r); } }), ' ',
+              h('button', { type: 'button', class: 'link-btn', text: 'Show on keyplan', onclick: function () {
+                var first = r.section_ids.map(function (id) { return S.sections.get(id); }).filter(Boolean)[0];
+                S.rfiFocus = r.id; setPage('keyplan'); if (first && first.block !== S.block) setBlock(first.block); setDisp('rfi'); S.rfiFocus = r.id; paintStatuses(); renderPanel();
+              } })));
+        })))));
+    }
+    body.append(rfiCardEl);
+    // RFI statuses
+    var stCard = h('div', { class: 'card' }, h('h2', { text: 'RFI statuses' }), h('p', { class: 'card-sub', text: 'Configurable. A status marked "closed" counts the RFI as resolved on the dashboard.' }));
+    Array.from(S.q.statuses.values()).forEach(function (x) {
+      stCard.append(h('div', { class: 'cat-row' + (x.is_active ? '' : ' off') }, h('span', { text: x.name + (x.is_closed ? ' · closed' : '') + (x.is_active ? '' : ' (not offered)') }),
+        h('button', { type: 'button', class: 'link-btn', text: x.is_active ? 'Stop offering' : 'Offer again', onclick: function () {
+          call('admin_save_rfi_status', { p_id: x.id, p_name: x.name, p_sort: x.sort, p_is_closed: x.is_closed, p_is_active: !x.is_active }).then(qualityRefresh).catch(function (e) { toast(e.message, 'err'); });
+        } })));
+    });
+    var sn = h('input', { id: 'rfi-st-new', maxlength: 60, placeholder: 'New status' }), sc = h('input', { type: 'checkbox', id: 'rfi-st-closed' });
+    stCard.append(h('div', { class: 'tool-row' }, sn, h('label', { class: 'check' }, sc, h('span', { text: 'closed' })),
+      h('button', { type: 'button', class: 'btn small', text: 'Add status', onclick: function () {
+        call('admin_save_rfi_status', { p_id: null, p_name: sn.value, p_sort: 99, p_is_closed: sc.checked, p_is_active: true }).then(qualityRefresh).catch(function (e) { toast(e.message, 'err'); });
+      } })));
+    body.append(stCard);
+  }
+  function rfiForm(r) {
+    var used = S.q.rfis.filter(function (x) { return !r || x.id !== r.id; }).map(function (x) { return x.color; });
+    var color = r ? r.color : (RFI_SUGGEST.filter(function (c) { return used.indexOf(c) < 0; })[0] || '#334155');
+    function inp(id, v, attrs) { var i = h('input', Object.assign({ id: id }, attrs || {})); i.value = v || ''; return i; }
+    var fNo = inp('rf-no', r && r.rfi_no, { maxlength: 60, placeholder: 'e.g. RFI-PAG1A-001' }), fCol = inp('rf-col', color, { type: 'color' });
+    var fDis = inp('rf-dis', r && r.discipline, { maxlength: 80, placeholder: 'e.g. Mounting Structure, Electrical' });
+    var fSub = inp('rf-sub', r && r.subject, { maxlength: 300 });
+    var fSt = h('select', { id: 'rf-st' }, Array.from(S.q.statuses.values()).filter(function (x) { return x.is_active || (r && r.status_id === x.id); }).map(function (x) { return h('option', { value: x.id, text: x.name, selected: r ? r.status_id === x.id : x.sort === 1 }); }));
+    var fRa = inp('rf-ra', r && r.date_raised, { type: 'date' }), fRe = inp('rf-re', r && r.date_resolved, { type: 'date' });
+    var fRm = h('textarea', { id: 'rf-rm', maxlength: 2000, rows: 3 }); fRm.value = (r && r.remarks) || '';
+    var sw = h('div', { class: 'palette' }, RFI_SUGGEST.map(function (c) {
+      return h('button', { type: 'button', class: 'sw-btn', color: c, disabled: used.indexOf(c) >= 0, 'aria-label': 'Colour ' + c, onclick: function () { fCol.value = c; } });
+    }));
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', id: 'rf-save', text: r ? 'Save changes' : 'Create RFI' });
+    save.addEventListener('click', function () {
+      save.disabled = true; err.hidden = true;
+      call('admin_save_rfi', { p_id: r ? r.id : null, p_rfi_no: fNo.value, p_color: fCol.value, p_discipline: fDis.value, p_subject: fSub.value, p_status_id: +fSt.value,
+        p_date_raised: fRa.value || null, p_date_resolved: fRe.value || null, p_remarks: fRm.value || null })
+        .then(function () { return qualityRefresh(); })
+        .then(function () { closeModal(); toast(r ? 'RFI saved. The change is in its history.' : 'RFI created. Link its sections from Keyplan → RFI.', 'ok', 6000); })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    function field(id, label, el) { return h('div', { class: 'field' }, h('label', { for: id, text: label }), el); }
+    openModal(r ? 'Edit ' + r.rfi_no : 'New RFI', [
+      h('div', { class: 'grid-form' }, field('rf-no', 'RFI number', fNo), field('rf-st', 'Status', fSt)),
+      h('div', { class: 'field' }, h('label', { for: 'rf-col', text: 'Colour on the keyplan (unique per RFI)' }), h('div', { class: 'tool-row' }, fCol, sw)),
+      field('rf-dis', 'Activity or discipline', fDis), field('rf-sub', 'Subject / description', fSub),
+      h('div', { class: 'grid-form' }, field('rf-ra', 'Date raised', fRa), field('rf-re', 'Date resolved', fRe)),
+      field('rf-rm', 'Remarks and supporting details', fRm), err,
+      h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+
   function renderAdmin(refetch) {
     var root = $('#admin'); if (!root || !isAdmin()) return;
     var scrollY = root.parentElement.scrollTop;
@@ -2102,7 +2513,7 @@
     root.append(h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Administration' }),
       h('p', { text: 'Accounts, contractors, assignments and drawing review. Only administrators see this page.' }))));
     root.append(h('div', { class: 'subtabs', role: 'group', 'aria-label': 'Administration sections' },
-      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['targets', 'Targets'], ['review', 'Drawing review']].map(function (x) {
+      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['targets', 'Targets'], ['quality', 'CCI & RFI'], ['review', 'Drawing review']].map(function (x) {
         return h('button', { type: 'button', 'aria-pressed': String(A.tab === x[0]), text: x[1], onclick: function () { A.tab = x[0]; renderAdmin(true); } });
       })));
     var body = h('div', { class: 'stack', id: 'admin-body' });
@@ -2111,6 +2522,7 @@
     else if (A.tab === 'companies') renderCompanies(body);
     else if (A.tab === 'assignments') renderAssignments(body, refetch || !A.log);
     else if (A.tab === 'targets') renderTargetsAdmin(body);
+    else if (A.tab === 'quality') renderQualityAdmin(body);
     else renderReview(body);
     if (!refetch) root.parentElement.scrollTop = scrollY;
   }
@@ -2189,7 +2601,8 @@
               : h('span', { class: 'pill on', text: 'Active' });
         return h('tr', null,
           h('td', null, h('strong', { class: 'mono', text: u.username })), h('td', { text: u.full_name || '—' }),
-          h('td', { class: 'nowrap' }, ROLE_LABEL[u.role], u.can_assign ? h('div', { class: 'small muted', text: '+ can assign' }) : null),
+          h('td', { class: 'nowrap' }, ROLE_LABEL[u.role], u.can_assign ? h('div', { class: 'small muted', text: '+ can assign' }) : null,
+            u.can_record_cci && u.role !== 'admin' ? h('div', { class: 'small muted', text: '+ records CCI results' }) : null),
           h('td', null, u.company_id ? cchip(u.company_id) : '—'), h('td', null, st),
           h('td', { class: 'nowrap', text: u.last_login_at ? fmtTime(u.last_login_at) : 'Never' }),
           h('td', { class: 'nowrap' }, h('div', { class: 'btn-row nowrap' },
@@ -2216,13 +2629,16 @@
     var fAct = h('input', { id: 'e-active', type: 'checkbox', checked: u.is_active });
     var fAsg = h('input', { id: 'e-assign', type: 'checkbox', checked: !!u.can_assign });
     var asgRow = h('label', { class: 'check' }, fAsg, h('span', { text: 'Allow this subcontractor to assign and reassign contractors' }));
-    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; }
+    var fCci = h('input', { id: 'e-cci', type: 'checkbox', checked: !!u.can_record_cci });
+    var cciRow = h('label', { class: 'check' }, fCci, h('span', { text: 'May record official CCI inspection and approval results' }));
+    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; cciRow.hidden = fRole.value !== 'viewer'; }
     fRole.addEventListener('change', syncRole); syncRole();
     var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
     var save = h('button', { type: 'button', class: 'btn primary', text: 'Save changes' });
     save.addEventListener('click', function () {
       save.disabled = true; err.hidden = true;
       call('admin_update_user', { p_user_id: u.id, p_full_name: fName.value.trim(), p_role: fRole.value, p_company_id: fCo.value ? +fCo.value : null, p_is_active: fAct.checked, p_can_assign: fRole.value === 'subcontractor' && fAsg.checked })
+        .then(function () { return fRole.value === 'viewer' || u.can_record_cci ? call('admin_set_cci_permission', { p_user_id: u.id, p_allowed: fRole.value === 'viewer' && fCci.checked }) : null; })
         .then(function () { closeModal(); toast('Account ' + u.username + ' updated.', 'ok'); S.admin.users = null; renderAdmin(true); })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
@@ -2230,7 +2646,7 @@
       h('div', { class: 'field' }, h('label', { for: 'e-name', text: 'Full name' }), fName),
       h('div', { class: 'field' }, h('label', { for: 'e-role', text: 'Role' }), fRole),
       h('div', { class: 'field' }, h('label', { for: 'e-company', text: 'Company' }), fCo),
-      asgRow,
+      asgRow, cciRow,
       h('label', { class: 'check' }, fAct, h('span', { text: 'Account active (untick to block sign-in; this also signs the user out)' })),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
