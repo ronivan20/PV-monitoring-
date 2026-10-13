@@ -5,7 +5,8 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 5;
+  var DB_VERSION = 6;
+  var CM_STATUS = { open: 'Open', in_progress: 'In progress', responded: 'Responded', closed: 'Closed' };
   var CCI = ['not_inspected', 'in_progress', 'pending_approval', 'approved', 'rejected', 'reinspection'];
   var CCI_LABEL = { not_inspected: 'Not Yet Inspected', in_progress: 'Inspection in Progress', pending_approval: 'Inspected – Pending Approval',
     approved: 'Approved by CCI', rejected: 'Rejected / Rectification Required', reinspection: 'For Reinspection' };
@@ -17,7 +18,7 @@
   function otherAct(a) { return a === 'mounting' ? 'module' : 'mounting'; }
   var ST = ['not_started', 'ongoing', 'completed', 'on_hold'];
   var ST_LABEL = { not_started: 'Not Started', ongoing: 'Ongoing', completed: 'Completed', on_hold: 'On Hold' };
-  var ROLE_LABEL = { admin: 'Administrator', subcontractor: 'Subcontractor', viewer: 'Viewer (read only)' };
+  var ROLE_LABEL = { admin: 'Administrator', subcontractor: 'Subcontractor', viewer: 'Viewer (read only)', client: 'Client (view and comment)' };
   var SIDE_LABEL = { W: 'West', E: 'East' };
   var FLAG_LABEL = {
     no_id: 'No table ID in drawing',
@@ -172,6 +173,7 @@
     page: 'keyplan', block: 1, disp: 'status', act: 'mounting', selected: null, mode: 'details', form: null,
     scopeOnly: true, pick: null, multi: new Set(), multiFresh: false, highlight: null, firstFit: true,
     bulk: false, bulkStatus: null, bulkRemarks: '', siteDate: null, myTarget: null,
+    cm: { list: [], canComment: false, bySec: new Map(), sig: '' }, cmFilter: 'active',
     q: { cats: [], cci: new Map(), rfis: [], rfiById: new Map(), rfiBySec: new Map(), statuses: new Map(), canCci: false }, rfiFocus: null,
     tgt: { from: null, to: null, company: 'all', act: 'all', block: 'all', data: null, loading: false },
     dash: { block: 'all', act: 'all', status: 'all', company: 'all', page: 0 },
@@ -180,6 +182,7 @@
   function curOf(sid, act) { return S.cur.get(sid + '|' + act) || null; }
   function statusOf(sid, act) { var u = curOf(sid, act); return u ? u.status : 'not_started'; }
   function isAdmin() { return !!S.user && S.user.role === 'admin'; }
+  function isClient() { return !!S.user && S.user.role === 'client'; }
   function isSub() { return !!S.user && S.user.role === 'subcontractor'; }
   function canAssign() { return !!S.user && (S.user.role === 'admin' || (S.user.role === 'subcontractor' && S.user.can_assign)); }
   function counted(s) { return !!s.code && s.is_active; }
@@ -318,7 +321,16 @@
       S.multi.forEach(function (id) { if (!S.sections.has(id)) S.multi.delete(id); });
       applyUser(d.user);
       KP.stale = true; // rebuild the keyplan with the new data; the zoom and position are kept
-    }).then(loadQuality);
+    }).then(loadQuality).then(loadComments);
+  }
+  function loadComments() {
+    return rpc('get_comments', { p_token: S.token }).then(function (d) {
+      var list = d.comments || [], sig = list.map(function (c) { return c.id + ':' + c.status + ':' + c.replies.length; }).join(',');
+      var changed = sig !== S.cm.sig;
+      S.cm = { list: list, canComment: !!d.can_comment, bySec: new Map(), sig: sig };
+      list.forEach(function (c) { var l = S.cm.bySec.get(c.section_id) || []; l.push(c); S.cm.bySec.set(c.section_id, l); });
+      return changed;
+    });
   }
   function loadQuality() {
     return rpc('get_quality', { p_token: S.token }).then(function (d) {
@@ -974,14 +986,14 @@
         return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: c[st] + ' · ' + fmtPct(c[st], list.length) })];
       })),
       h('div', { class: 'notice info' },
-        h('strong', { text: isAdmin() ? 'To update a section' : 'View-only access' }),
+        h('strong', { text: isAdmin() ? 'To update a section' : isClient() ? 'Client view' : 'View-only access' }),
         isAdmin()
           ? h('ol', { class: 'steps' },
             h('li', { text: 'Choose the block and the activity above.' }),
             h('li', { text: 'Tap the West or East section of a table, or type its ID in the search box.' }),
             h('li', { text: 'Press Update status on the activity, choose the status and check the company.' }),
             h('li', { text: 'Check the summary, then press Confirm and save.' }))
-          : h('p', { class: 'small', text: 'Tap a section to see its contractors, status and history.' })),
+          : h('p', { class: 'small', text: isClient() ? 'Tap a section to see its status, CCI results, RFIs and history, and to add a comment.' : 'Tap a section to see its contractors, status and history.' })),
       isAdmin() ? bulkButton() : null));
   }
 
@@ -1199,6 +1211,7 @@
     if (s.code) {
       [S.act, otherAct(S.act)].forEach(function (act) { stack.append(actCard(s, act)); }); // activity on screen first
       var qcard = cciCard(s); if (qcard) stack.append(qcard);
+      var ccard = commentsCard(s); if (ccard) stack.append(ccard);
       if (isSub() && s.is_active && !updatableActs(s).length) {
         stack.append(h('p', { class: 'small muted', text: 'This section is not assigned to your company for either activity. Ask the administrator if this is wrong.' }));
       }
@@ -1472,6 +1485,11 @@
     S.polling = true;
     return call('get_changes', { p_since: S.serverTime }).then(function (d) {
       S.serverTime = d.server_time; S.lastSync = new Date(); S.syncErr = false;
+      loadComments().then(function (changed) {
+        if (!changed) return;
+        if (S.page === 'dashboard') renderDashboard();
+        else if (S.page === 'keyplan' && S.selected && S.mode === 'details') renderPanel();
+      }).catch(function () { /* next poll */ });
       applyUser(d.user);
       if (S.selected && S.history.get(S.selected) === 'error') loadHistory(S.selected, true);
       if (d.meta_version !== S.metaVersion) {
@@ -1551,6 +1569,7 @@
     if (isSub()) { var big = todayTargetCard(false); if (big) root.append(big); }
     root.append(renderTargetBoard());
     root.append(renderCciBoard(blocks, F));
+    if (isAdmin() || isClient() || isSub()) root.append(renderCommentsBoard(blocks));
 
     function sel(id, label, value, options, key) {
       return h('div', { class: 'field' }, h('label', { for: id, text: label }),
@@ -2505,6 +2524,90 @@
       h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
 
+  // ------------------------------------------------------------------
+  // Client comments
+  // ------------------------------------------------------------------
+  function cmPill(st) { return h('span', { class: 'pill cm-' + st, text: CM_STATUS[st] }); }
+  function commentThread(c, withSection) {
+    var s = S.sections.get(c.section_id);
+    var box = h('div', { class: 'cm-thread', 'data-id': c.id },
+      h('div', { class: 'cm-head' }, cmPill(c.status),
+        withSection && s ? h('button', { type: 'button', class: 'link-btn tid', text: c.section_code, onclick: function () { locate(s, c.activity || S.act); } }) : null,
+        h('span', { class: 'small', text: (c.activity ? ACT_SHORT[c.activity] : 'General') + ' · ' + (c.full_name || c.username) + ' (' + (ROLE_LABEL[c.user_role] || c.user_role).replace(/ \(.*\)/, '') + ') · ' + fmtTime(c.created_at) })),
+      h('p', { class: 'cm-body', text: c.body }));
+    c.replies.forEach(function (r) {
+      box.append(h('div', { class: 'cm-reply' },
+        h('div', { class: 'small muted', text: r.username + (r.company_name ? ' · ' + r.company_name : '') + ' · ' + fmtTime(r.created_at) + (r.new_status ? ' · ' + CM_STATUS[r.prev_status] + ' → ' + CM_STATUS[r.new_status] : '') }),
+        r.body ? h('p', { text: r.body }) : null));
+    });
+    if (isAdmin() || isClient() || isSub()) box.append(h('button', { type: 'button', class: 'btn small', text: 'Reply / follow up', onclick: function () { replyForm(c); } }));
+    return box;
+  }
+  function commentsCard(s) {
+    if (!s.code || !(isAdmin() || isClient() || isSub())) return null;
+    var list = S.cm.bySec.get(s.id) || [];
+    if (!list.length && !S.cm.canComment) return null;
+    var card = h('section', { class: 'act-card cm-card', 'aria-label': 'Client comments' }, h('h3', { text: 'Client comments' + (list.length ? ' (' + list.length + ')' : '') }));
+    if (!list.length) card.append(h('p', { class: 'small muted', text: 'No comments on this section yet.' }));
+    list.forEach(function (c) { card.append(commentThread(c, false)); });
+    if (S.cm.canComment) card.append(h('button', { type: 'button', class: 'btn primary small', id: 'btn-add-comment', text: 'Add comment', onclick: function () { commentForm(s); } }));
+    return card;
+  }
+  function commentForm(s) {
+    var act = h('select', { id: 'cm-act' }, [['', 'General (both activities)'], ['mounting', ACT.mounting], ['module', ACT.module]].map(function (o) { return h('option', { value: o[0], text: o[1], selected: o[0] === S.act }); }));
+    var body = h('textarea', { id: 'cm-body', maxlength: 2000, rows: 4 });
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', id: 'cm-save', text: 'Submit comment' });
+    save.addEventListener('click', function () {
+      save.disabled = true; err.hidden = true;
+      call('add_comment', { p_section_id: s.id, p_activity: act.value || null, p_body: body.value })
+        .then(loadComments).then(function () { closeModal(); toast('Comment submitted on ' + secLabel(s) + '.', 'ok'); renderPanel(); })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    openModal('Comment on ' + secLabel(s), [
+      h('p', { class: 'small', text: 'Shown to the administrator, client accounts and the contractor responsible for this section. It is saved with your name and the server time and cannot be edited later; follow-ups are added as replies.' }),
+      h('div', { class: 'field' }, h('label', { for: 'cm-act', text: 'Activity' }), act),
+      h('div', { class: 'field' }, h('label', { for: 'cm-body', text: 'Comment' }), body), err,
+      h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function replyForm(c) {
+    var opts = isSub() ? ['', 'in_progress', 'responded'] : ['', 'open', 'in_progress', 'responded', 'closed'];
+    var st = h('select', { id: 'cm-st' }, opts.map(function (o) { return h('option', { value: o, text: o ? CM_STATUS[o] : 'Keep ' + CM_STATUS[c.status] }); }));
+    var body = h('textarea', { id: 'cm-reply', maxlength: 2000, rows: 3 });
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', id: 'cm-reply-save', text: 'Save reply' });
+    save.addEventListener('click', function () {
+      save.disabled = true; err.hidden = true;
+      call('reply_comment', { p_comment_id: c.id, p_body: body.value, p_status: st.value || null })
+        .then(loadComments).then(function () { closeModal(); toast('Reply saved.', 'ok'); if (S.page === 'dashboard') renderDashboard(); else renderPanel(); })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    openModal('Reply · ' + c.section_code, [
+      h('p', { class: 'small cm-quote', text: c.body }),
+      h('div', { class: 'field' }, h('label', { for: 'cm-reply', text: 'Reply or follow-up action' }), body),
+      h('div', { class: 'field' }, h('label', { for: 'cm-st', text: 'Follow-up status' }), st),
+      isSub() ? h('p', { class: 'small muted', text: 'Only the administrator or the client can close or reopen a comment.' }) : null, err,
+      h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function renderCommentsBoard(blocks) {
+    var card = h('div', { class: 'card cm-board' }, h('h2', { text: isSub() ? 'Client comments on your sections' : 'Client comments' }));
+    var f = h('select', { id: 'cm-filter', onchange: function (e) { S.cmFilter = e.target.value; renderDashboard(); } },
+      [['active', 'Needing follow-up (not closed)'], ['all', 'All comments'], ['open', 'Open'], ['in_progress', 'In progress'], ['responded', 'Responded'], ['closed', 'Closed']].map(function (o) {
+        return h('option', { value: o[0], text: o[1], selected: S.cmFilter === o[0] });
+      }));
+    card.append(h('div', { class: 'field cm-filter' }, h('label', { for: 'cm-filter', text: 'Show' }), f));
+    var list = S.cm.list.filter(function (c) {
+      return blocks.indexOf(c.block) >= 0 && (S.cmFilter === 'all' || (S.cmFilter === 'active' ? c.status !== 'closed' : c.status === S.cmFilter));
+    });
+    var counts = {}; Object.keys(CM_STATUS).forEach(function (k) { counts[k] = 0; });
+    S.cm.list.forEach(function (c) { if (blocks.indexOf(c.block) >= 0) counts[c.status]++; });
+    card.append(h('p', { class: 'small', text: Object.keys(CM_STATUS).map(function (k) { return CM_STATUS[k] + ' ' + counts[k]; }).join(' · ') }));
+    if (!list.length) card.append(h('p', { class: 'small muted', text: 'No comments to show.' }));
+    list.slice(0, 100).forEach(function (c) { card.append(commentThread(c, true)); });
+    if (S.cm.canComment) card.append(h('p', { class: 'small muted', text: 'To add a comment, open a section on the Keyplan and press Add comment.' }));
+    return card;
+  }
+
   function renderAdmin(refetch) {
     var root = $('#admin'); if (!root || !isAdmin()) return;
     var scrollY = root.parentElement.scrollTop;
@@ -2528,7 +2631,7 @@
   }
 
   function roleOptions(selected) {
-    return ['subcontractor', 'viewer', 'admin'].map(function (r) { return h('option', { value: r, text: ROLE_LABEL[r], selected: r === selected }); });
+    return ['subcontractor', 'client', 'viewer', 'admin'].map(function (r) { return h('option', { value: r, text: ROLE_LABEL[r], selected: r === selected }); });
   }
   function companyOptions(selected, allowNone) {
     return [h('option', { value: '', text: allowNone ? 'None' : 'Choose…' })].concat(S.companies.map(function (c) {
@@ -2549,7 +2652,7 @@
     var btn = h('button', { type: 'submit', class: 'btn primary', text: 'Create account' });
     var form = h('form', { class: 'card', novalidate: true },
       h('h2', { text: 'Add an account' }),
-      h('p', { class: 'card-sub', text: 'Subcontractors update the sections assigned to their company. Viewers can only look. Administrators manage everything.' }),
+      h('p', { class: 'card-sub', text: 'Subcontractors update the sections assigned to their company. Clients (e.g. CCI) see everything and comment on sections. Viewers can only look. Administrators manage everything.' }),
       !S.companies.length ? h('div', { class: 'notice warn', text: 'Add the contractor and subcontractor companies first (Companies tab). Subcontractor accounts need a company.' }) : null,
       h('div', { class: 'grid-form' },
         h('div', { class: 'field' }, h('label', { for: 'a-user', text: 'Username' }), fUser),
@@ -2631,14 +2734,14 @@
     var asgRow = h('label', { class: 'check' }, fAsg, h('span', { text: 'Allow this subcontractor to assign and reassign contractors' }));
     var fCci = h('input', { id: 'e-cci', type: 'checkbox', checked: !!u.can_record_cci });
     var cciRow = h('label', { class: 'check' }, fCci, h('span', { text: 'May record official CCI inspection and approval results' }));
-    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; cciRow.hidden = fRole.value !== 'viewer'; }
+    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; cciRow.hidden = ['viewer', 'client'].indexOf(fRole.value) < 0; }
     fRole.addEventListener('change', syncRole); syncRole();
     var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
     var save = h('button', { type: 'button', class: 'btn primary', text: 'Save changes' });
     save.addEventListener('click', function () {
       save.disabled = true; err.hidden = true;
       call('admin_update_user', { p_user_id: u.id, p_full_name: fName.value.trim(), p_role: fRole.value, p_company_id: fCo.value ? +fCo.value : null, p_is_active: fAct.checked, p_can_assign: fRole.value === 'subcontractor' && fAsg.checked })
-        .then(function () { return fRole.value === 'viewer' || u.can_record_cci ? call('admin_set_cci_permission', { p_user_id: u.id, p_allowed: fRole.value === 'viewer' && fCci.checked }) : null; })
+        .then(function () { var okRole = ['viewer', 'client'].indexOf(fRole.value) >= 0; return okRole || u.can_record_cci ? call('admin_set_cci_permission', { p_user_id: u.id, p_allowed: okRole && fCci.checked }) : null; })
         .then(function () { closeModal(); toast('Account ' + u.username + ' updated.', 'ok'); S.admin.users = null; renderAdmin(true); })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });

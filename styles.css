@@ -622,3 +622,16 @@ details.hist-box summary { cursor: pointer; font-weight: 700; padding: 6px 0; }
 .palette .sw-btn { width: 28px; height: 28px; }
 input[type="color"] { width: 52px; height: 38px; padding: 2px; }
 @media (max-width: 600px) { #seg-view { flex-basis: 100%; } }
+
+/* ---------- update 6: client comments ---------- */
+.cm-thread { border-top: 1px solid var(--line); padding: 8px 0; }
+.cm-head { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+.cm-body { margin: 6px 0; white-space: pre-wrap; }
+.cm-reply { margin: 4px 0 4px 14px; padding-left: 10px; border-left: 3px solid var(--line); }
+.cm-reply p { margin: 2px 0; white-space: pre-wrap; }
+.cm-quote { border-left: 3px solid var(--line); padding-left: 10px; white-space: pre-wrap; }
+.cm-filter { max-width: 320px; }
+.pill.cm-open { background: var(--warn-bg); color: var(--warn); border-color: #f1d49a; }
+.pill.cm-in_progress { background: #e0ecff; color: #1d4ed8; border-color: #bfd3fb; }
+.pill.cm-responded { background: #ede9fe; color: #6d28d9; border-color: #d8cdfb; }
+.pill.cm-closed { background: var(--ok-bg); color: var(--ok); border-color: #b9e0c4; }
