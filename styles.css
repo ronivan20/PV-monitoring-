@@ -550,3 +550,39 @@ details.hist-box summary { cursor: pointer; font-weight: 700; padding: 6px 0; }
 .kv .asg-dd .cchip { margin: -3px 0; }
 .co-table th, .co-table td { padding-left: 7px; padding-right: 7px; }
 .co-table thead th { letter-spacing: .02em; }
+
+/* ---------- update 4: bulk updates and daily targets ---------- */
+.bulk-start { margin-top: 8px; }
+.bulk-tools .sel-list { max-height: 120px; overflow: auto; }
+.bulk-ids { max-height: 180px; overflow: auto; }
+.confirm-dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 0 0 12px; }
+.confirm-dl dt { color: var(--ink-2); font-size: 13px; }
+.confirm-dl dd { margin: 0; font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.today-card { border: 2px solid var(--ink); border-radius: 12px; padding: 14px 16px; background: #fffdf3; margin-bottom: 14px; }
+.today-card.compact { padding: 10px 12px; margin-bottom: 10px; }
+.today-title { margin: 0; font-size: 18px; letter-spacing: .04em; font-weight: 800; }
+.today-card.compact .today-title { font-size: 14px; }
+.today-date { margin: 2px 0 8px; color: var(--ink-2); font-size: 13px; }
+.today-row { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 8px; }
+.today-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-bottom: 8px; }
+.today-nums { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+.today-nums > div { display: flex; flex-direction: column; }
+.tn-label { font-size: 12px; color: var(--ink-2); }
+.tn-num { font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.today-card.compact .tn-num { font-size: 20px; }
+.today-remarks { margin: 6px 0 0; }
+.tgt-filters { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.tgt-table td.num, .tgt-table th { white-space: nowrap; }
+.muted-row td { color: var(--ink-2); }
+.day-pick { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.tf-dates { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 12px; margin: 6px 0 12px; }
+.tf-date { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+.tf-date span { flex: 1; font-size: 13px; }
+.tf-date input { width: 76px; }
+.link-btn.danger { color: var(--danger); }
+@media (max-width: 900px) { .tgt-filters { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 480px) { .today-nums { grid-template-columns: 1fr 1fr; } }
+.today-title { color: var(--ink); }
+.tgt-table td:last-child { white-space: normal; min-width: 230px; }
+.tgt-table td:last-child .link-btn { margin-right: 8px; }
+.card .grid-form + .grid-form, .card .grid-form + .field { margin-top: 12px; }

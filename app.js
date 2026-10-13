@@ -5,7 +5,7 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 3;
+  var DB_VERSION = 4;
   var ACT = { mounting: 'Mounting Structure Installation', module: 'PV Module Installation' };
   var ACT_SHORT = { mounting: 'Mounting Structure', module: 'PV Module' };
   var ACT_TINY = { mounting: 'Mounting', module: 'PV Module' };
@@ -167,6 +167,8 @@
     // disp: what the colours show ('assign' = contractors, 'status' = installation status); act: which activity
     page: 'keyplan', block: 1, disp: 'status', act: 'mounting', selected: null, mode: 'details', form: null,
     scopeOnly: true, pick: null, multi: new Set(), multiFresh: false, highlight: null, firstFit: true,
+    bulk: false, bulkStatus: null, bulkRemarks: '', siteDate: null, myTarget: null,
+    tgt: { from: null, to: null, company: 'all', act: 'all', block: 'all', data: null, loading: false },
     dash: { block: 'all', act: 'all', status: 'all', company: 'all', page: 0 },
     admin: { tab: 'accounts', users: null, log: null, reviewAll: false, afilter: { block: 'all', act: 'all', company: 'all', area: 'all', page: 0 } }
   };
@@ -283,6 +285,7 @@
           ? 'The database needs the latest update (update ' + DB_VERSION + '). Ask the administrator to run it, then reload this page.'
           : 'A newer version of this app is available. Reload the page.', 'version', 0);
       }
+      S.siteDate = d.site_date || null;
       if (Array.isArray(d.palette) && d.palette.length) PALETTE = d.palette.map(function (c) { return String(c).toLowerCase(); });
       S.kp = {};
       d.keyplans.forEach(function (k) { S.kp[k.block] = k; });
@@ -315,7 +318,8 @@
 
   // first view after signing in: subcontractors start on the status of their own activity and block
   function afterLogin() {
-    S.firstFit = true;
+    S.firstFit = true; S.bulk = false; S.myTarget = null; S.tgt.data = null;
+    loadMyTarget();
     S.highlight = null;
     if (isSub()) {
       S.scopeOnly = true;
@@ -389,7 +393,7 @@
   function setDisp(d) {
     if (d === S.disp || (d !== 'assign' && d !== 'status')) return;
     S.disp = d; savePrefs({ disp: d });
-    if (d !== 'assign') { S.pick = null; S.multi.clear(); S.multiFresh = false; }
+    S.pick = null; S.multi.clear(); S.multiFresh = false; S.bulk = false;
     renderToolbar(); paintStatuses(); renderPanel();
   }
   // which activity the keyplan shows; a selection made for assigning is kept, so the
@@ -397,6 +401,7 @@
   function setAct(a) {
     if (a === S.act || ACTS.indexOf(a) < 0) return;
     S.act = a; savePrefs({ act: a });
+    if (S.bulk) { S.multi.clear(); S.bulkStatus = null; }
     renderToolbar(); paintStatuses(); renderPanel();
   }
   function modeLabel() {
@@ -692,6 +697,10 @@
           removeAreaRect();
           if (g.moved >= 5) {
             var hit = sectionsInRect(g.start, toUser(e.clientX, e.clientY));
+            if (S.bulk) {
+              var all = hit.length; hit = hit.filter(canBulk);
+              if (all && hit.length < all) toast(plural(all - hit.length, 'section') + ' in the box ' + (all - hit.length === 1 ? 'is' : 'are') + ' not yours for ' + ACT_SHORT[S.act] + ' and ' + (all - hit.length === 1 ? 'was' : 'were') + ' left out.', 'err', 5000);
+            }
             if (hit.length) startNewSelection();
             hit.forEach(function (s) { S.multi.add(s.id); });
             paintStatuses(); renderPanel();
@@ -818,6 +827,11 @@
   }
   function toggleMulti(id) {
     if (!id) return;
+    if (S.bulk && !S.multi.has(id) && !canBulk(S.sections.get(id))) {
+      var bs = S.sections.get(id);
+      toast((bs ? secLabel(bs) + ': ' : '') + (bs && !bs.code ? 'this section has no ID yet.' : 'you cannot update ' + ACT_SHORT[S.act] + ' here (not assigned to your company).'), 'err', 5000);
+      return;
+    }
     if (S.multiFresh) { startNewSelection(); paintStatuses(); }
     if (S.multi.has(id)) S.multi.delete(id); else S.multi.add(id);
     var s = S.sections.get(id), g = KP.groups.get(id);
@@ -837,7 +851,7 @@
     var s = S.sections.get(S.selected);
     var tools = S.disp === 'assign' && canAssign() && (S.pick || S.multi.size);
     // phones: the panel is a bottom sheet; only short content may grow without a height limit
-    P.classList.toggle('collapsed', !s && !S.highlight && !(S.disp === 'assign' && canAssign()));
+    P.classList.toggle('collapsed', !s && !S.highlight && !S.bulk && !(S.disp === 'assign' && canAssign()));
     if (S.highlight) {
       var hn = (S.secByBlock[S.block] || []).filter(function (x) { var a = asgOf(x.id, S.act); return a && a.company_id === S.highlight.cid; }).length;
       P.append(h('div', { class: 'notice info sibling' }, cchip(S.highlight.cid),
@@ -858,6 +872,7 @@
       else if (S.mode === 'confirm') renderConfirm(P, s);
       else renderDetails(P, s);
     } else if (S.disp === 'assign' && canAssign()) renderAssignTools(P);
+    else if (S.bulk) renderBulkTools(P);
     else renderPanelSummary(P);
     if (S.mode === 'details') P.scrollTop = keepScroll;
   }
@@ -889,6 +904,7 @@
     if (isSub()) { renderScope(P, mobile); return; }
     if (mobile) {
       P.append(h('p', { class: 'panel-sub' }, h('strong', { text: 'Tap a section' }), ' to see its contractors and status' + (isAdmin() ? ' and update it.' : '.')));
+      if (isAdmin() && S.disp === 'status') P.append(bulkButton());
       return;
     }
     var list = (S.secByBlock[S.block] || []).filter(counted);
@@ -916,7 +932,8 @@
             h('li', { text: 'Tap the West or East section of a table, or type its ID in the search box.' }),
             h('li', { text: 'Press Update status on the activity, choose the status and check the company.' }),
             h('li', { text: 'Check the summary, then press Confirm and save.' }))
-          : h('p', { class: 'small', text: 'Tap a section to see its contractors, status and history.' }))));
+          : h('p', { class: 'small', text: 'Tap a section to see its contractors, status and history.' })),
+      isAdmin() ? bulkButton() : null));
   }
 
   // Subcontractor: their scope per activity (an assignment for one activity does not cover the other)
@@ -930,9 +947,11 @@
         text: here.length ? plural(here.length, 'section') + ' for ' + ACT_SHORT[act] + ' in Block ' + S.block + '. Tap one to update it.'
           : 'No ' + ACT_SHORT[act] + ' sections for you in Block ' + S.block + (cnt[oa][S.block] ? '. You have ' + ACT_SHORT[oa] + ' sections here.' : '.')
       })));
+      var tm = todayTargetCard(true); if (tm) P.append(tm);
+      if (here.length && S.disp === 'status') P.append(bulkButton());
       return;
     }
-    var stack = h('div', { class: 'stack scope-card' },
+    var stack = h('div', { class: 'stack scope-card' }, todayTargetCard(true),
       h('div', null, h('h2', { text: 'Your scope' }), h('div', { class: 'sibling' }, cchip(co))));
     if (!total) {
       stack.append(h('div', { class: 'notice warn', text: 'No sections are assigned to your company yet. Ask the administrator to assign your tables and activity.' }));
@@ -953,7 +972,8 @@
           return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: c[st] + ' · ' + fmtPct(c[st], here.length) })];
         })),
         h('div', { class: 'tool-row' },
-          h('button', { type: 'button', class: 'btn small', text: 'Zoom to my sections', onclick: function () { if (!fitScope(true)) toast('Nothing assigned to you in this block.', 'err'); } })));
+          h('button', { type: 'button', class: 'btn small', text: 'Zoom to my sections', onclick: function () { if (!fitScope(true)) toast('Nothing assigned to you in this block.', 'err'); } }),
+          S.disp === 'status' ? bulkButton() : null));
     } else {
       var tips = [];
       if (cnt[act][otherBlock]) tips.push(h('button', { type: 'button', class: 'btn small', text: 'Go to Block ' + otherBlock, onclick: function () { setBlock(otherBlock); } }));
@@ -1412,6 +1432,8 @@
         if (!prev || prev.id < u.id) { S.cur.set(k, u); changed.push(u); }
       });
       if (changed.length) {
+        loadMyTarget();
+        if (S.page === 'dashboard' || (S.page === 'admin' && S.admin.tab === 'targets')) S.tgt.data = null;
         changed.forEach(function (u) {
           var hist = S.history.get(u.section_id);
           if (hist && hist.history && !hist.history.some(function (x) { return x.id === u.id; })) hist.history.unshift(u);
@@ -1429,6 +1451,7 @@
     }).then(function () { S.polling = false; renderSync(); });
   }
   function refreshAll() {
+    loadMyTarget();
     if (S.page === 'keyplan') {
       rebuildKeyplan();
       if (S.selected) loadHistory(S.selected, true); // the reload emptied the history cache
@@ -1474,6 +1497,8 @@
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn small', text: 'Download current status (CSV)', onclick: exportCurrent }),
         h('button', { type: 'button', class: 'btn small', text: 'Download full history (CSV)', onclick: exportHistory }))));
+    if (isSub()) { var big = todayTargetCard(false); if (big) root.append(big); }
+    root.append(renderTargetBoard());
 
     function sel(id, label, value, options, key) {
       return h('div', { class: 'field' }, h('label', { for: id, text: label }),
@@ -1717,6 +1742,358 @@
   // ------------------------------------------------------------------
   // Administration
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Bulk status update (several sections, one activity, one status)
+  // ------------------------------------------------------------------
+  function canBulk(s) { return !!s && canUpdate(s, S.act) && !!asgOf(s.id, S.act); }
+  function bulkButton() {
+    return h('button', { type: 'button', class: 'btn small bulk-start', text: 'Update several sections', onclick: startBulk });
+  }
+  function startBulk() {
+    S.bulk = true; S.bulkStatus = null; S.selected = null; S.mode = 'details'; S.form = null;
+    S.multi.clear(); S.multiFresh = false; S.pick = 'tap';
+    paintStatuses(); renderPanel(); drawSelMarker();
+  }
+  function endBulk() {
+    S.bulk = false; S.pick = null; S.multi.clear(); S.bulkStatus = null; S.bulkRemarks = '';
+    paintStatuses(); renderPanel();
+  }
+  function bulkSelection() {
+    return Array.from(S.multi).map(function (id) { return S.sections.get(id); }).filter(canBulk).sort(cmpSec);
+  }
+  function renderBulkTools(P) {
+    var act = S.act, sel = bulkSelection();
+    var stack = h('div', { class: 'stack bulk-tools' }, todayTargetCard(true),
+      h('div', null, h('h2', { text: 'Update several · ' + ACT_SHORT[act] + ' · Block ' + S.block }),
+        h('p', { class: 'panel-sub', text: 'Only ' + ACT[act] + ' changes. The ' + ACT_SHORT[otherAct(act)] + ' status stays as it is. Switch the activity above to update the other one.' })),
+      h('div', { class: 'tool-row' },
+        h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'tap'), text: 'Tap to select', onclick: function () { setPick(S.pick === 'tap' ? null : 'tap'); } }),
+        h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(S.pick === 'area'), text: 'Draw an area', onclick: function () { setPick(S.pick === 'area' ? null : 'area'); } }),
+        h('button', { type: 'button', class: 'btn small', text: 'Select all mine here', onclick: function () {
+          (S.secByBlock[S.block] || []).forEach(function (x) { if (canBulk(x)) S.multi.add(x.id); });
+          paintStatuses(); renderPanel();
+        } })),
+      h('p', { class: 'mode-note', text: S.pick === 'area' ? 'Drag a box on the keyplan. Sections you can update for ' + ACT_SHORT[act] + ' are added.'
+        : S.pick === 'tap' ? 'Tap sections to add or remove them.' : 'Choose a selection tool.' }),
+      h('div', { class: 'sel-count', text: sel.length ? plural(sel.length, 'section') + ' selected' : 'No sections selected' }));
+    if (sel.length) {
+      stack.append(h('div', { class: 'sel-list', text: sel.slice(0, 60).map(secLabel).join(', ') + (sel.length > 60 ? ' …' : '') }));
+      var now = statusCounts(sel, act);
+      stack.append(h('p', { class: 'small', text: 'Current ' + ACT_SHORT[act] + ' status:' }),
+        h('div', { class: 'summary-grid' }, ST.filter(function (x) { return now[x]; }).map(function (st) {
+          return [h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }), h('span', { class: 'num', text: String(now[st]) })];
+        })));
+      stack.append(h('div', { class: 'field' }, h('span', { class: 'label', text: 'New status for all selected' }),
+        h('div', { class: 'status-pick' }, ST.map(function (st) {
+          return h('button', { type: 'button', 'data-st': st, 'aria-pressed': String(S.bulkStatus === st),
+            onclick: function () { S.bulkStatus = st; renderPanel(); } }, h('span', { class: 'sw s-' + st }), h('span', { text: ST_LABEL[st] }));
+        }))));
+      var rm = h('textarea', { id: 'bulk-remarks', maxlength: 500, rows: 2, placeholder: 'Optional; saved on each new record' });
+      rm.value = S.bulkRemarks || '';
+      rm.addEventListener('input', function () { S.bulkRemarks = rm.value; });
+      stack.append(h('div', { class: 'field' }, h('label', { for: 'bulk-remarks', text: 'Remarks' }), rm));
+      stack.append(h('div', { class: 'tool-row' },
+        h('button', { type: 'button', class: 'btn primary', id: 'btn-bulk-review', disabled: !S.bulkStatus,
+          text: S.bulkStatus ? 'Review ' + plural(sel.length, 'update') : 'Choose the new status', onclick: function () { reviewBulk(sel); } }),
+        h('button', { type: 'button', class: 'btn ghost', text: 'Clear selection', onclick: function () { S.multi.clear(); paintStatuses(); renderPanel(); } })));
+    }
+    stack.append(h('div', { class: 'tool-row' }, h('button', { type: 'button', class: 'btn', text: 'Done', onclick: endBulk })));
+    P.append(stack);
+  }
+  function reviewBulk(sel) {
+    var act = S.act, st = S.bulkStatus;
+    var change = sel.filter(function (x) { return statusOf(x.id, act) !== st; });
+    var same = sel.length - change.length;
+    var byCo = new Map();
+    change.forEach(function (x) { var a = asgOf(x.id, act); byCo.set(a.company_id, (byCo.get(a.company_id) || 0) + 1); });
+    var prev = statusCounts(change, act);
+    var btn = h('button', { type: 'button', class: 'btn primary', id: 'btn-bulk-confirm', text: change.length ? 'Confirm and save ' + plural(change.length, 'update') : 'Nothing to save' });
+    btn.disabled = !change.length;
+    btn.addEventListener('click', function () { saveBulk(sel, btn); });
+    openModal('Confirm ' + plural(change.length, 'update'), [
+      h('dl', { class: 'confirm-dl' },
+        h('dt', { text: 'Activity' }), h('dd', { text: ACT[act] }),
+        h('dt', { text: 'New status' }), h('dd', null, chip(st)),
+        h('dt', { text: 'Sections' }), h('dd', { text: change.length + (same ? ' (' + same + ' already ' + ST_LABEL[st] + ', not saved again)' : '') }),
+        h('dt', { text: 'Responsible contractor' }), h('dd', null, Array.from(byCo.entries()).map(function (e) { return cchip(e[0], ' · ' + e[1]); })),
+        h('dt', { text: 'Previous status' }), h('dd', { text: ST.filter(function (x) { return prev[x]; }).map(function (x) { return ST_LABEL[x] + ' ' + prev[x]; }).join(' · ') || '—' }),
+        S.bulkRemarks ? h('dt', { text: 'Remarks' }) : null, S.bulkRemarks ? h('dd', { text: S.bulkRemarks }) : null),
+      h('p', { class: 'small', text: 'Section IDs:' }),
+      h('div', { class: 'sel-list bulk-ids', text: change.map(secLabel).join(', ') || '—' }),
+      h('p', { class: 'small muted', text: 'Only these sections and only ' + ACT_SHORT[act] + ' change. Earlier records and remarks are kept.' }),
+      h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Back', onclick: closeModal }))]);
+  }
+  function saveBulk(sel, btn) {
+    var act = S.act, expected = {};
+    sel.forEach(function (x) { var u = curOf(x.id, act); expected[x.id] = u ? u.id : null; });
+    btn.disabled = true; btn.textContent = 'Saving…';
+    call('bulk_submit_update', { p_section_ids: sel.map(function (x) { return x.id; }), p_activity: act, p_status: S.bulkStatus, p_remarks: S.bulkRemarks || null, p_expected: expected })
+      .then(function (r) {
+        closeModal();
+        toast('Saved ' + plural(r.changed, 'section') + ' as ' + ST_LABEL[S.bulkStatus] + ' for ' + ACT_SHORT[act] + (r.unchanged ? ' (' + r.unchanged + ' unchanged).' : '.'), 'ok', 7000);
+        S.multi.clear(); S.bulkStatus = null; S.bulkRemarks = '';
+        return loadBootstrap().then(function () { refreshAll(); });
+      })
+      .catch(function (e) {
+        closeModal();
+        if (e.hint !== 'session' && e.hint !== 'password') toast(e.message, 'err', 10000);
+        if (e.hint === 'conflict') loadBootstrap().then(function () { refreshAll(); });
+      });
+  }
+
+  // ------------------------------------------------------------------
+  // Daily targets
+  // ------------------------------------------------------------------
+  function fmtDate(d) {
+    if (!d) return '—';
+    var x = new Date(d + 'T00:00:00');
+    return x.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  }
+  function addDays(d, n) { var x = new Date(d + 'T00:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); }
+  function pct1(a, b) { return b ? (Math.round(1000 * a / b) / 10).toFixed(1) + '%' : '—'; }
+  function tgtIndicator(acc, q) {
+    if (acc > q) return h('span', { class: 'pill on', text: 'Over target +' + (acc - q) });
+    if (acc === q) return h('span', { class: 'pill on', text: 'Target met' });
+    return h('span', { class: 'pill warn', text: 'Below target −' + (q - acc) });
+  }
+  function areaLabel(t) { return 'Block ' + t.block + (t.area ? ' · ' + t.area : ''); }
+  function loadMyTarget() {
+    if (!isSub() || !S.token) return;
+    rpc('get_target_board', { p_token: S.token }).then(function (d) {
+      S.myTarget = d;
+      if (S.page === 'keyplan' && !S.selected) renderPanel();
+      else if (S.page === 'dashboard') renderDashboard();
+    }).catch(function () { /* shown as unavailable */ });
+  }
+  // contractor: THIS IS YOUR TARGET FOR TODAY
+  function todayTargetCard(compact) {
+    if (!isSub()) return null;
+    var d = S.myTarget;
+    var box = h('section', { class: 'today-card' + (compact ? ' compact' : ''), 'aria-label': 'Your target for today' },
+      h('h2', { class: 'today-title', text: 'THIS IS YOUR TARGET FOR TODAY' }),
+      h('p', { class: 'today-date', text: d ? fmtDate(d.site_date) : 'Loading…' }));
+    if (!d) return box;
+    if (!d.targets.length) {
+      box.append(h('p', { class: 'small', text: 'No target has been set for your company today. Ask the administrator if you expected one.' }));
+      return box;
+    }
+    d.targets.forEach(function (t) {
+      var acc = t.accomplished, q = t.quantity, rem = Math.max(0, q - acc);
+      var sc = t.scope || {};
+      box.append(h('div', { class: 'today-row' },
+        h('div', { class: 'today-head' }, h('strong', { text: ACT[t.activity] }), h('span', { text: areaLabel(t) }), tgtIndicator(acc, q)),
+        h('div', { class: 'today-nums' },
+          h('div', null, h('span', { class: 'tn-label', text: 'Daily target' }), h('span', { class: 'tn-num', text: String(q) })),
+          h('div', null, h('span', { class: 'tn-label', text: 'Accomplished' }), h('span', { class: 'tn-num', text: String(acc) })),
+          h('div', null, h('span', { class: 'tn-label', text: 'Remaining' }), h('span', { class: 'tn-num', text: String(rem) })),
+          h('div', null, h('span', { class: 'tn-label', text: 'Achieved' }), h('span', { class: 'tn-num', text: pct1(acc, q) }))),
+        h('div', { class: 'bar' }, (function () { var sp = h('span', { class: 'b-completed' }); sp.style.width = Math.min(100, q ? 100 * acc / q : 0) + '%'; return sp; })()),
+        compact ? null : h('p', { class: 'small', text: 'Your assigned ' + ACT_SHORT[t.activity] + ' work in ' + areaLabel(t) + ': ' + (sc.completed || 0) + ' Completed, ' + (sc.ongoing || 0) + ' Ongoing, ' + (sc.on_hold || 0) + ' On Hold, ' + (sc.not_started || 0) + ' Not Started of ' + (sc.total || 0) + '.' }),
+        t.remarks ? h('p', { class: 'small today-remarks', text: 'Instructions: ' + t.remarks }) : null));
+    });
+    if (!compact) box.append(h('p', { class: 'small muted', text: 'Accomplished = sections first saved as Completed today (Philippine time). Saving the same section again does not count twice.' }));
+    return box;
+  }
+  // target vs accomplished table (dashboard; subcontractors see only their own company)
+  function renderTargetBoard() {
+    var T = S.tgt;
+    if (!T.from) { T.from = S.siteDate; T.to = S.siteDate; }
+    var card = h('div', { class: 'card tgt-board' }, h('h2', { text: 'Daily target vs accomplished' }));
+    function dateIn(id, label, key) {
+      var i = h('input', { id: id, type: 'date', value: T[key] || '' });
+      i.addEventListener('change', function () { T[key] = i.value || S.siteDate; if (key === 'from' && T.to < T.from) T.to = T.from; T.data = null; renderDashboard(); });
+      return h('div', { class: 'field' }, h('label', { for: id, text: label }), i);
+    }
+    function sel(id, label, key, opts) {
+      return h('div', { class: 'field' }, h('label', { for: id, text: label }),
+        h('select', { id: id, onchange: function (e) { T[key] = e.target.value; renderDashboard(); } },
+          opts.map(function (o) { return h('option', { value: o[0], text: o[1], selected: String(T[key]) === String(o[0]) }); })));
+    }
+    card.append(h('div', { class: 'filters tgt-filters' },
+      dateIn('t-from', 'From', 'from'), dateIn('t-to', 'To', 'to'),
+      isSub() ? null : sel('t-co', 'Contractor', 'company', [['all', 'All contractors']].concat(S.companies.map(function (c) { return [String(c.id), c.name]; }))),
+      sel('t-act', 'Activity', 'act', [['all', 'Both activities'], ['mounting', ACT_SHORT.mounting], ['module', ACT_SHORT.module]]),
+      sel('t-blk', 'Block', 'block', [['all', 'Both blocks'], ['1', 'Block 1'], ['5', 'Block 5']])));
+    if (!T.data || T.data.from !== T.from || T.data.to !== T.to) {
+      card.append(h('p', { class: 'small muted', text: 'Loading targets…' }));
+      if (!T.loading) {
+        T.loading = true;
+        call('get_target_board', { p_from: T.from, p_to: T.to }).then(function (d) { T.data = d; })
+          .catch(function (e) { T.data = { from: T.from, to: T.to, targets: [], untargeted: [], error: e.message }; })
+          .then(function () { T.loading = false; if (S.page === 'dashboard') renderDashboard(); else if (S.page === 'admin') renderAdmin(); });
+      }
+      return card;
+    }
+    if (T.data.error) { card.append(h('p', { class: 'form-error', text: T.data.error })); return card; }
+    function keep(r) {
+      return (T.company === 'all' || String(r.company_id) === T.company) && (T.act === 'all' || r.activity === T.act) && (T.block === 'all' || String(r.block) === T.block);
+    }
+    var rows = T.data.targets.filter(keep), extra = T.data.untargeted.filter(keep);
+    var tq = 0, ta = 0; rows.forEach(function (r) { tq += r.quantity; ta += r.accomplished; });
+    card.append(h('p', { class: 'small', text: rows.length ? 'Total: target ' + tq + ', accomplished ' + ta + ', remaining ' + Math.max(0, tq - ta) + ' (' + pct1(ta, tq) + ').' : 'No targets in this period for these filters.' }));
+    if (rows.length || extra.length) {
+      card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable tgt-table' },
+        h('thead', null, h('tr', null, ['Date', 'Contractor', 'Activity', 'Block / area', 'Target', 'Accomplished', 'Remaining', 'Achieved', ''].map(function (x) { return h('th', { text: x }); }))),
+        h('tbody', null,
+          rows.map(function (r) {
+            return h('tr', null, h('td', { class: 'nowrap', text: fmtDate(r.date) }), h('td', null, cchip(r.company_id)),
+              h('td', { text: ACT_SHORT[r.activity] }), h('td', { text: areaLabel(r) }),
+              h('td', { class: 'num' }, String(r.quantity), r.revision ? h('div', { class: 'small muted', text: 'revised (was ' + r.original_quantity + ')' }) : null),
+              h('td', { class: 'num', text: String(r.accomplished) }), h('td', { class: 'num', text: String(Math.max(0, r.quantity - r.accomplished)) }),
+              h('td', { class: 'num', text: pct1(r.accomplished, r.quantity) }),
+              h('td', { class: 'nowrap' }, tgtIndicator(r.accomplished, r.quantity), ' ',
+                h('button', { type: 'button', class: 'link-btn', text: 'History', onclick: function () { showTargetHistory(r); } })));
+          }),
+          extra.map(function (r) {
+            return h('tr', { class: 'muted-row' }, h('td', { class: 'nowrap', text: fmtDate(r.date) }), h('td', null, cchip(r.company_id)),
+              h('td', { text: ACT_SHORT[r.activity] }), h('td', { text: 'Block ' + r.block }), h('td', { class: 'num', text: '—' }),
+              h('td', { class: 'num', text: String(r.accomplished) }), h('td', { class: 'num', text: '—' }), h('td', { class: 'num', text: '—' }),
+              h('td', null, h('span', { class: 'pill off', text: 'No target set' })));
+          })))));
+    }
+    card.append(h('p', { class: 'small muted', text: 'Accomplished = sections first saved as Completed on that date (Philippine time), counted once per section and activity. These are reported by the contractor; CCI approval is tracked separately.' }));
+    return card;
+  }
+  function showTargetHistory(t) {
+    call('get_target_revisions', { p_target_id: t.id }).then(function (d) {
+      openModal('Target history · ' + companyName(t.company_id), [
+        h('p', { class: 'small', text: ACT[t.activity] + ' · ' + areaLabel(t) + ' · ' + fmtDate(t.date) + '. The dashboard uses the current quantity: ' + t.quantity + '.' }),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+          h('thead', null, h('tr', null, ['When', 'Change', 'Quantity', 'Instructions', 'By'].map(function (x) { return h('th', { text: x }); }))),
+          h('tbody', null, d.revisions.map(function (r) {
+            return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(r.at) }),
+              h('td', { text: r.action === 'created' ? 'Set' : r.action === 'revised' ? 'Revised' : 'Removed' }),
+              h('td', { text: r.action === 'revised' ? r.prev_quantity + ' → ' + r.new_quantity : String(r.new_quantity != null ? r.new_quantity : r.prev_quantity) }),
+              h('td', { text: (r.action === 'revised' && r.prev_remarks !== r.new_remarks ? (r.prev_remarks || '—') + ' → ' : '') + ((r.action === 'removed' ? r.prev_remarks : r.new_remarks) || '—') }),
+              h('td', { text: r.username }));
+          })))),
+        h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', text: 'Close', onclick: closeModal }))]);
+    }).catch(function (e) { toast(e.message, 'err'); });
+  }
+  // administrator: set targets
+  function renderTargetsAdmin(body) {
+    var A = S.admin; A.tf = A.tf || { company: '', act: 'mounting', block: '1', area: '', qty: '', start: S.siteDate, end: S.siteDate, days: [1, 2, 3, 4, 5, 6], dates: [], remarks: '' };
+    var F = A.tf;
+    var form = h('div', { class: 'card' }, h('h2', { text: 'Set daily targets' }),
+      h('p', { class: 'card-sub', text: 'Targets are per contractor and activity. Choose the exact working days: only the dates in the list get a target, each with its own quantity of table sections.' }));
+    function fsel(id, label, key, opts) {
+      return h('div', { class: 'field' }, h('label', { for: id, text: label }),
+        h('select', { id: id, onchange: function (e) { F[key] = e.target.value; renderAdmin(); } },
+          opts.map(function (o) { return h('option', { value: o[0], text: o[1], selected: String(F[key]) === String(o[0]) }); })));
+    }
+    var areas = new Set(); S.assign.forEach(function (a) {
+      var sx = S.sections.get(a.section_id);
+      if (a.area && String(a.company_id) === F.company && a.activity === F.act && sx && String(sx.block) === F.block) areas.add(a.area);
+    });
+    form.append(h('div', { class: 'grid-form' },
+      fsel('tf-co', 'Contractor', 'company', [['', 'Choose…']].concat(activeCompanies().map(function (c) { return [String(c.id), c.name]; }))),
+      fsel('tf-act', 'Activity', 'act', [['mounting', ACT.mounting], ['module', ACT.module]]),
+      fsel('tf-blk', 'Block', 'block', [['1', 'Block 1'], ['5', 'Block 5']]),
+      fsel('tf-area', 'Work area (optional)', 'area', [['', 'Whole block']].concat(Array.from(areas).sort().map(function (a) { return [a, a]; })))));
+    // date picking
+    var qty = h('input', { id: 'tf-qty', type: 'number', min: 1, max: 5000, value: F.qty, placeholder: 'e.g. 30' });
+    qty.addEventListener('input', function () { F.qty = qty.value; });
+    var st = h('input', { id: 'tf-start', type: 'date', value: F.start || '' }), en = h('input', { id: 'tf-end', type: 'date', value: F.end || '' });
+    st.addEventListener('change', function () { F.start = st.value; }); en.addEventListener('change', function () { F.end = en.value; });
+    var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    var dayBox = h('div', { class: 'day-pick', role: 'group', 'aria-label': 'Working days' }, dayNames.map(function (n, i) {
+      var cb = h('input', { type: 'checkbox', checked: F.days.indexOf(i) >= 0 });
+      cb.addEventListener('change', function () { F.days = F.days.filter(function (x) { return x !== i; }); if (cb.checked) F.days.push(i); });
+      return h('label', { class: 'check' }, cb, h('span', { text: n }));
+    }));
+    form.append(h('div', { class: 'grid-form' },
+      h('div', { class: 'field' }, h('label', { for: 'tf-qty', text: 'Quantity per date (sections)' }), qty),
+      h('div', { class: 'field' }, h('label', { for: 'tf-start', text: 'From' }), st),
+      h('div', { class: 'field' }, h('label', { for: 'tf-end', text: 'To (same date for one day)' }), en)),
+      h('div', { class: 'field' }, h('span', { class: 'label', text: 'Working days in that range' }), dayBox),
+      h('div', { class: 'tool-row' }, h('button', { type: 'button', class: 'btn', id: 'tf-add', text: 'Add these dates to the list', onclick: function () {
+        if (!F.start) { toast('Choose the first date.', 'err'); return; }
+        var q = parseInt(F.qty, 10); if (!(q >= 1)) { toast('Enter the quantity per date first.', 'err'); return; }
+        var end = F.end && F.end >= F.start ? F.end : F.start, d = F.start, n = 0, guard = 0;
+        while (d <= end && guard++ < 400) {
+          var wd = new Date(d + 'T00:00:00Z').getUTCDay();
+          if (F.days.indexOf(wd) >= 0 || d === end && d === F.start) {
+            var ex = F.dates.filter(function (x) { return x.date === d; })[0];
+            if (ex) ex.quantity = q; else F.dates.push({ date: d, quantity: q });
+            n++;
+          }
+          d = addDays(d, 1);
+        }
+        F.dates.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+        if (!n) toast('No working days in that range. Tick the days of the week first.', 'err');
+        renderAdmin();
+      } })));
+    if (F.dates.length) {
+      form.append(h('p', { class: 'small', text: plural(F.dates.length, 'target date') + '. Change any quantity or remove a date before saving:' }),
+        h('div', { class: 'tf-dates' }, F.dates.map(function (x) {
+          var qi = h('input', { type: 'number', min: 1, max: 5000, value: x.quantity, 'aria-label': 'Quantity for ' + x.date });
+          qi.addEventListener('input', function () { x.quantity = parseInt(qi.value, 10) || 0; });
+          return h('div', { class: 'tf-date' }, h('span', { text: fmtDate(x.date) }), qi,
+            h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Remove ' + x.date, text: '×', onclick: function () { F.dates = F.dates.filter(function (y) { return y !== x; }); renderAdmin(); } }));
+        })));
+    }
+    var rmk = h('textarea', { id: 'tf-remarks', maxlength: 500, rows: 2, placeholder: 'Optional instructions shown to the contractor' });
+    rmk.value = F.remarks; rmk.addEventListener('input', function () { F.remarks = rmk.value; });
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', id: 'tf-save', text: F.dates.length ? 'Save ' + plural(F.dates.length, 'target') : 'Save targets' });
+    save.disabled = !F.dates.length;
+    save.addEventListener('click', function () {
+      err.hidden = true;
+      if (!F.company) { err.textContent = 'Choose the contractor.'; err.hidden = false; return; }
+      save.disabled = true;
+      call('admin_set_targets', { p_company_id: +F.company, p_activity: F.act, p_block: +F.block, p_area: F.area, p_dates: F.dates, p_remarks: F.remarks || null })
+        .then(function (r) {
+          toast('Targets saved: ' + r.created + ' new, ' + r.revised + ' revised' + (r.unchanged ? ', ' + r.unchanged + ' unchanged' : '') + '.', 'ok', 6000);
+          F.dates = []; S.tgt.data = null; renderAdmin();
+        })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    form.append(h('div', { class: 'field' }, h('label', { for: 'tf-remarks', text: 'Remarks or instructions' }), rmk), err,
+      h('p', { class: 'small muted', text: 'Saving a date that already has a target for this contractor, activity and area revises it; the original and every change stay in its history.' }),
+      h('div', { class: 'btn-row' }, save));
+    body.append(form);
+    // list with edit / remove
+    var list = renderTargetBoard();
+    list.querySelector('h2').textContent = 'Targets and results';
+    $$('.tgt-table tbody tr', list).forEach(function (tr, i) {
+      var rows = (S.tgt.data && S.tgt.data.targets || []).filter(function (r) {
+        var T = S.tgt; return (T.company === 'all' || String(r.company_id) === T.company) && (T.act === 'all' || r.activity === T.act) && (T.block === 'all' || String(r.block) === T.block);
+      });
+      var r = rows[i]; if (!r) return;
+      var cell = tr.lastChild;
+      cell.append(' ', h('button', { type: 'button', class: 'link-btn', text: 'Revise', onclick: function () { reviseTarget(r); } }), ' ',
+        h('button', { type: 'button', class: 'link-btn danger', text: 'Remove', onclick: function () { removeTarget(r); } }));
+    });
+    body.append(list);
+  }
+  function reviseTarget(t) {
+    var q = h('input', { id: 'rv-q', type: 'number', min: 1, max: 5000, value: t.quantity });
+    var rm = h('textarea', { id: 'rv-r', maxlength: 500, rows: 2 }); rm.value = t.remarks || '';
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', text: 'Save revision' });
+    save.addEventListener('click', function () {
+      save.disabled = true;
+      call('admin_set_targets', { p_company_id: t.company_id, p_activity: t.activity, p_block: t.block, p_area: t.area, p_dates: [{ date: t.date, quantity: parseInt(q.value, 10) || 0 }], p_remarks: rm.value || null })
+        .then(function () { closeModal(); toast('Target revised. The original stays in its history.', 'ok'); S.tgt.data = null; renderAdmin(); })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    openModal('Revise target · ' + companyName(t.company_id), [
+      h('p', { class: 'small', text: ACT[t.activity] + ' · ' + areaLabel(t) + ' · ' + fmtDate(t.date) }),
+      h('div', { class: 'field' }, h('label', { for: 'rv-q', text: 'Quantity (sections)' }), q),
+      h('div', { class: 'field' }, h('label', { for: 'rv-r', text: 'Remarks or instructions' }), rm), err,
+      h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function removeTarget(t) {
+    openModal('Remove this target?', [
+      h('p', { text: companyName(t.company_id) + ' · ' + ACT[t.activity] + ' · ' + areaLabel(t) + ' · ' + fmtDate(t.date) + ' · ' + t.quantity + ' sections. It stops counting on the dashboard; its history is kept.' }),
+      h('div', { class: 'btn-row' },
+        h('button', { type: 'button', class: 'btn primary', text: 'Remove', onclick: function () {
+          call('admin_remove_target', { p_target_id: t.id }).then(function () { closeModal(); toast('Target removed.', 'ok'); S.tgt.data = null; renderAdmin(); })
+            .catch(function (e) { toast(e.message, 'err'); });
+        } }),
+        h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+
   function renderAdmin(refetch) {
     var root = $('#admin'); if (!root || !isAdmin()) return;
     var scrollY = root.parentElement.scrollTop;
@@ -1725,7 +2102,7 @@
     root.append(h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Administration' }),
       h('p', { text: 'Accounts, contractors, assignments and drawing review. Only administrators see this page.' }))));
     root.append(h('div', { class: 'subtabs', role: 'group', 'aria-label': 'Administration sections' },
-      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['review', 'Drawing review']].map(function (x) {
+      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['targets', 'Targets'], ['review', 'Drawing review']].map(function (x) {
         return h('button', { type: 'button', 'aria-pressed': String(A.tab === x[0]), text: x[1], onclick: function () { A.tab = x[0]; renderAdmin(true); } });
       })));
     var body = h('div', { class: 'stack', id: 'admin-body' });
@@ -1733,6 +2110,7 @@
     if (A.tab === 'accounts') renderAccounts(body, refetch || !A.users);
     else if (A.tab === 'companies') renderCompanies(body);
     else if (A.tab === 'assignments') renderAssignments(body, refetch || !A.log);
+    else if (A.tab === 'targets') renderTargetsAdmin(body);
     else renderReview(body);
     if (!refetch) root.parentElement.scrollTop = scrollY;
   }
