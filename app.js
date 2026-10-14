@@ -5,7 +5,7 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 6;
+  var DB_VERSION = 7;
   var CM_STATUS = { open: 'Open', in_progress: 'In progress', responded: 'Responded', closed: 'Closed' };
   var CCI = ['not_inspected', 'in_progress', 'pending_approval', 'approved', 'rejected', 'reinspection'];
   var CCI_LABEL = { not_inspected: 'Not Yet Inspected', in_progress: 'Inspection in Progress', pending_approval: 'Inspected – Pending Approval',
@@ -182,6 +182,7 @@
   function curOf(sid, act) { return S.cur.get(sid + '|' + act) || null; }
   function statusOf(sid, act) { var u = curOf(sid, act); return u ? u.status : 'not_started'; }
   function isAdmin() { return !!S.user && S.user.role === 'admin'; }
+  function canRfi() { return !!S.user && (S.user.role === 'admin' || !!S.user.can_manage_rfi); }
   function isClient() { return !!S.user && S.user.role === 'client'; }
   function isSub() { return !!S.user && S.user.role === 'subcontractor'; }
   function canAssign() { return !!S.user && (S.user.role === 'admin' || (S.user.role === 'subcontractor' && S.user.can_assign)); }
@@ -909,7 +910,7 @@
     var s = S.sections.get(S.selected);
     var tools = S.disp === 'assign' && canAssign() && (S.pick || S.multi.size);
     // phones: the panel is a bottom sheet; only short content may grow without a height limit
-    P.classList.toggle('collapsed', !s && !S.highlight && !S.bulk && !(S.disp === 'assign' && canAssign()) && !(S.disp === 'cci' && S.q.canCci) && !(S.disp === 'rfi' && isAdmin()));
+    P.classList.toggle('collapsed', !s && !S.highlight && !S.bulk && !(S.disp === 'assign' && canAssign()) && !(S.disp === 'cci' && S.q.canCci) && !(S.disp === 'rfi' && canRfi()));
     if (S.highlight) {
       var hn = (S.secByBlock[S.block] || []).filter(function (x) { var a = asgOf(x.id, S.act); return a && a.company_id === S.highlight.cid; }).length;
       P.append(h('div', { class: 'notice info sibling' }, cchip(S.highlight.cid),
@@ -932,7 +933,7 @@
     } else if (S.disp === 'assign' && canAssign()) renderAssignTools(P);
     else if (S.bulk) renderBulkTools(P);
     else if (S.disp === 'cci' && S.q.canCci) renderCciTools(P);
-    else if (S.disp === 'rfi' && isAdmin()) renderRfiTools(P);
+    else if (S.disp === 'rfi' && canRfi()) renderRfiTools(P);
     else if (S.disp === 'cci' || S.disp === 'rfi') renderQualitySummary(P);
     else renderPanelSummary(P);
     if (S.mode === 'details') P.scrollTop = keepScroll;
@@ -2375,16 +2376,78 @@
     }).catch(function (e) { toast(e.message, 'err'); });
   }
   function rfiCard(s) {
-    var rl = rfisOf(s.id); if (!rl.length) return null;
-    var card = h('section', { class: 'act-card rfi-card', 'aria-label': 'RFIs' }, h('h3', { text: plural(rl.length, 'RFI') }));
+    var rl = rfisOf(s.id);
+    if (!rl.length && !canRfi()) return null;
+    var card = h('section', { class: 'act-card rfi-card', 'aria-label': 'RFIs' }, h('h3', { text: rl.length ? 'Assigned RFIs (' + rl.length + ')' : 'Assigned RFIs' }));
+    if (!rl.length) card.append(h('p', { class: 'small muted', text: 'No RFI is assigned to this section.' }));
     rl.forEach(function (r) {
-      card.append(h('div', { class: 'rfi-item' }, rfiChip(r),
+      card.append(h('div', { class: 'rfi-item', 'data-rfi': r.id }, rfiChip(r),
         h('p', { class: 'small', text: (r.discipline ? r.discipline + ' · ' : '') + r.subject }),
         h('p', { class: 'small muted', text: [r.date_raised && 'Raised ' + fmtDate(r.date_raised), r.date_resolved && 'Resolved ' + fmtDate(r.date_resolved)].filter(Boolean).join(' · ') }),
         r.remarks ? h('p', { class: 'small', text: r.remarks }) : null,
-        h('button', { type: 'button', class: 'link-btn', text: 'RFI history', onclick: function () { showRfiHistory(r); } })));
+        h('div', { class: 'tool-row' },
+          h('button', { type: 'button', class: 'link-btn', text: 'RFI history', onclick: function () { showRfiHistory(r); } }),
+          canRfi() ? h('button', { type: 'button', class: 'btn small', text: 'Change RFI', onclick: function () { changeRfiForm(s, r); } }) : null,
+          canRfi() ? h('button', { type: 'button', class: 'btn small danger-btn', text: 'Remove assigned RFI', onclick: function () { removeRfiConfirm(s, r); } }) : null)));
     });
+    card.append(h('div', { class: 'tool-row' },
+      canRfi() ? h('button', { type: 'button', class: 'btn small', text: rl.length ? 'Assign another RFI' : 'Assign an RFI', onclick: function () { changeRfiForm(s, null); } }) : null,
+      h('button', { type: 'button', class: 'link-btn', text: 'Assignment history', onclick: function () { showSectionRfiLog(s); } })));
     return card;
+  }
+  // change r -> another RFI, or (r null) add one; one section, one assignment
+  function changeRfiForm(s, r) {
+    var have = rfisOf(s.id).map(function (x) { return x.id; });
+    var opts = S.q.rfis.filter(function (x) { return have.indexOf(x.id) < 0; });
+    var sel = h('select', { id: 'rfi-change-to' }, [h('option', { value: '', text: opts.length ? 'Choose the RFI number…' : 'No other RFI available' })].concat(opts.map(function (x) {
+      var st = S.q.statuses.get(x.status_id); return h('option', { value: x.id, text: x.rfi_no + ' · ' + x.subject.slice(0, 50) + (st ? ' (' + st.name + ')' : '') });
+    })));
+    var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
+    var save = h('button', { type: 'button', class: 'btn primary', id: 'rfi-change-save', text: r ? 'Change RFI' : 'Assign RFI' });
+    save.addEventListener('click', function () {
+      if (!sel.value) { err.textContent = 'Choose the RFI number.'; err.hidden = false; return; }
+      save.disabled = true; err.hidden = true;
+      var to = S.q.rfiById.get(+sel.value);
+      call('change_section_rfi', { p_section_id: s.id, p_from_rfi_id: r ? r.id : null, p_to_rfi_id: +sel.value })
+        .then(qualityRefresh)
+        .then(function () { closeModal(); toast(r ? secLabel(s) + ': ' + r.rfi_no + ' changed to ' + to.rfi_no + '.' : to.rfi_no + ' assigned to ' + secLabel(s) + '.', 'ok', 6000); })
+        .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
+    });
+    openModal((r ? 'Change ' + r.rfi_no : 'Assign an RFI') + ' · ' + secLabel(s), [
+      h('p', { class: 'small', text: r ? 'Replaces ' + r.rfi_no + ' on this section only. Other RFIs on this section, and ' + r.rfi_no + ' on other sections, stay as they are.' : 'Adds an RFI to this section. RFIs already on it stay.' }),
+      h('div', { class: 'field' }, h('label', { for: 'rfi-change-to', text: 'New RFI number' }), sel), err,
+      h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function removeRfiConfirm(s, r) {
+    var btn = h('button', { type: 'button', class: 'btn primary danger-btn', id: 'rfi-remove-confirm', text: 'Remove assigned RFI' });
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      call('change_section_rfi', { p_section_id: s.id, p_from_rfi_id: r.id, p_to_rfi_id: null })
+        .then(qualityRefresh)
+        .then(function () { closeModal(); toast(r.rfi_no + ' removed from ' + secLabel(s) + '. The RFI itself is kept.', 'ok', 6000); })
+        .catch(function (e) { closeModal(); toast(e.message, 'err', 8000); qualityRefresh(); });
+    });
+    openModal('Remove ' + r.rfi_no + ' from ' + secLabel(s) + '?', [
+      h('p', { text: 'Only the link between ' + r.rfi_no + ' and section ' + secLabel(s) + ' is removed.' }),
+      h('ul', { class: 'small' },
+        h('li', { text: 'The RFI record, its details and its history are kept.' }),
+        h('li', { text: 'Other sections with ' + r.rfi_no + ' and other RFIs on this section are not affected.' }),
+        h('li', { text: 'Statuses, contractors and CCI records do not change. The removal is recorded in the assignment history.' })),
+      h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
+  }
+  function showSectionRfiLog(s) {
+    call('get_section_rfi_log', { p_section_id: s.id }).then(function (d) {
+      var L = { assigned: 'Assigned', changed: 'Changed', removed: 'Removed' };
+      openModal('RFI assignment history · ' + secLabel(s), [
+        d.log.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
+          h('thead', null, h('tr', null, ['When', 'Change', 'Previous RFI', 'New RFI', 'Block / section', 'By'].map(function (x) { return h('th', { text: x }); }))),
+          h('tbody', null, d.log.map(function (l) {
+            return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(l.at) }), h('td', { text: L[l.action] }),
+              h('td', { text: l.prev_rfi_no || '—' }), h('td', { text: l.new_rfi_no || (l.action === 'removed' ? 'Removed' : '—') }),
+              h('td', { class: 'nowrap', text: 'Block ' + l.block + ' · ' + (l.section_code || '') }), h('td', { text: l.username }));
+          })))) : h('p', { text: 'No RFI assignment changes recorded yet.' }),
+        h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn', text: 'Close', onclick: closeModal }))]);
+    }).catch(function (e) { toast(e.message, 'err'); });
   }
   function showRfiHistory(r) {
     call('get_rfi_history', { p_rfi_id: r.id }).then(function (d) {
@@ -2705,7 +2768,8 @@
         return h('tr', null,
           h('td', null, h('strong', { class: 'mono', text: u.username })), h('td', { text: u.full_name || '—' }),
           h('td', { class: 'nowrap' }, ROLE_LABEL[u.role], u.can_assign ? h('div', { class: 'small muted', text: '+ can assign' }) : null,
-            u.can_record_cci && u.role !== 'admin' ? h('div', { class: 'small muted', text: '+ records CCI results' }) : null),
+            u.can_record_cci && u.role !== 'admin' ? h('div', { class: 'small muted', text: '+ records CCI results' }) : null,
+            u.can_manage_rfi && u.role !== 'admin' ? h('div', { class: 'small muted', text: '+ manages RFI assignments' }) : null),
           h('td', null, u.company_id ? cchip(u.company_id) : '—'), h('td', null, st),
           h('td', { class: 'nowrap', text: u.last_login_at ? fmtTime(u.last_login_at) : 'Never' }),
           h('td', { class: 'nowrap' }, h('div', { class: 'btn-row nowrap' },
@@ -2734,7 +2798,9 @@
     var asgRow = h('label', { class: 'check' }, fAsg, h('span', { text: 'Allow this subcontractor to assign and reassign contractors' }));
     var fCci = h('input', { id: 'e-cci', type: 'checkbox', checked: !!u.can_record_cci });
     var cciRow = h('label', { class: 'check' }, fCci, h('span', { text: 'May record official CCI inspection and approval results' }));
-    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; cciRow.hidden = ['viewer', 'client'].indexOf(fRole.value) < 0; }
+    var fRfi = h('input', { id: 'e-rfi', type: 'checkbox', checked: !!u.can_manage_rfi });
+    var rfiRow = h('label', { class: 'check' }, fRfi, h('span', { text: 'May edit and remove RFI assignments on sections' }));
+    function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; cciRow.hidden = ['viewer', 'client'].indexOf(fRole.value) < 0; rfiRow.hidden = fRole.value === 'admin'; }
     fRole.addEventListener('change', syncRole); syncRole();
     var err = h('p', { class: 'form-error', hidden: true, role: 'alert' });
     var save = h('button', { type: 'button', class: 'btn primary', text: 'Save changes' });
@@ -2742,6 +2808,7 @@
       save.disabled = true; err.hidden = true;
       call('admin_update_user', { p_user_id: u.id, p_full_name: fName.value.trim(), p_role: fRole.value, p_company_id: fCo.value ? +fCo.value : null, p_is_active: fAct.checked, p_can_assign: fRole.value === 'subcontractor' && fAsg.checked })
         .then(function () { var okRole = ['viewer', 'client'].indexOf(fRole.value) >= 0; return okRole || u.can_record_cci ? call('admin_set_cci_permission', { p_user_id: u.id, p_allowed: okRole && fCci.checked }) : null; })
+        .then(function () { var want = fRole.value !== 'admin' && fRfi.checked; return want !== !!u.can_manage_rfi ? call('admin_set_rfi_permission', { p_user_id: u.id, p_allowed: want }) : null; })
         .then(function () { closeModal(); toast('Account ' + u.username + ' updated.', 'ok'); S.admin.users = null; renderAdmin(true); })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
@@ -2749,7 +2816,7 @@
       h('div', { class: 'field' }, h('label', { for: 'e-name', text: 'Full name' }), fName),
       h('div', { class: 'field' }, h('label', { for: 'e-role', text: 'Role' }), fRole),
       h('div', { class: 'field' }, h('label', { for: 'e-company', text: 'Company' }), fCo),
-      asgRow, cciRow,
+      asgRow, cciRow, rfiRow,
       h('label', { class: 'check' }, fAct, h('span', { text: 'Account active (untick to block sign-in; this also signs the user out)' })),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }

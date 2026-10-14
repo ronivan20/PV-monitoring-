@@ -635,3 +635,6 @@ input[type="color"] { width: 52px; height: 38px; padding: 2px; }
 .pill.cm-in_progress { background: #e0ecff; color: #1d4ed8; border-color: #bfd3fb; }
 .pill.cm-responded { background: #ede9fe; color: #6d28d9; border-color: #d8cdfb; }
 .pill.cm-closed { background: var(--ok-bg); color: var(--ok); border-color: #b9e0c4; }
+.danger-btn { color: var(--danger); border-color: #f3c0c2; }
+.btn.primary.danger-btn { background: var(--danger); color: #fff; border-color: var(--danger); }
+.rfi-card .tool-row { flex-wrap: wrap; gap: 6px 10px; align-items: center; }
