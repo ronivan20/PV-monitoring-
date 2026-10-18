@@ -9,9 +9,11 @@
 <meta name="theme-color" content="#15212c">
 <title>Solar PV Installation Monitoring</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="styles.css?v=202610141302">
-<script src="config.js?v=202610141302" defer></script>
-<script src="app.js?v=202610141302" defer></script>
+<link rel="stylesheet" href="styles.css?v=202610182050">
+<script src="config.js?v=202610182050" defer></script>
+<script src="app.js?v=202610182050" defer></script>
+<script src="piles.js?v=202610182050" defer></script>
+<script src="piles-pages.js?v=202610182050" defer></script>
 </head>
 <body>
 <div id="boot" class="boot"><span class="boot-dot"></span>Loading…</div>
@@ -74,6 +76,7 @@
     </div>
     <nav class="tabs" aria-label="Main">
       <button type="button" class="tab" data-view="keyplan" aria-current="page">Keyplan</button>
+      <button type="button" class="tab" data-view="piles" id="tab-piles">Piles</button>
       <button type="button" class="tab" data-view="dashboard">Dashboard</button>
       <button type="button" class="tab" data-view="admin" id="tab-admin" hidden>Admin</button>
     </nav>
@@ -141,6 +144,54 @@
   <!-- Dashboard view -->
   <section id="view-dashboard" class="view view-page" hidden>
     <div class="page" id="dash"></div>
+  </section>
+
+  <!-- Piles installation view (update 8) -->
+  <section id="view-piles" class="view view-piles" hidden>
+    <div class="psub" role="group" aria-label="Piles sections">
+      <button type="button" data-psub="keyplan" aria-pressed="true">Pile keyplan</button>
+      <button type="button" data-psub="dashboard">Pile dashboard</button>
+      <button type="button" data-psub="setup" id="psub-setup" hidden>Pile setup</button>
+    </div>
+    <div id="pile-kp" class="pview pview-kp">
+      <div class="toolbar ptoolbar">
+        <div class="seg" id="pseg-block" role="group" aria-label="Block">
+          <button type="button" data-block="1">Block 1</button>
+          <button type="button" data-block="5">Block 5</button>
+        </div>
+        <div class="seg" id="pseg-disp" role="group" aria-label="Colours show">
+          <button type="button" data-pdisp="status">Status</button>
+          <button type="button" data-pdisp="contractor">Contractors</button>
+          <button type="button" data-pdisp="inspection">Inspection</button>
+        </div>
+        <div class="search" id="psearch-box">
+          <svg class="search-ico" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4.5 4.5"/></svg>
+          <input id="psearch" type="search" placeholder="Find pile ID or table ID" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Find a pile by its ID" aria-autocomplete="list" aria-controls="psearch-list">
+          <ul id="psearch-list" class="search-list" role="listbox" hidden></ul>
+        </div>
+        <button type="button" class="btn small ghost" id="pbtn-help">Help</button>
+        <div class="sync" id="psync" title="Pile data refreshes automatically every 20 seconds"><span class="sync-dot"></span><span class="sync-text" id="psync-text">Connecting…</span></div>
+      </div>
+      <div class="pfilters" id="pfilters"></div>
+      <div class="legend-strip" id="plegend-strip" aria-label="Legend"></div>
+      <div class="stage">
+        <div class="canvas" id="pcanvas-wrap">
+          <canvas id="pkp" class="pkp" tabindex="0" role="img" aria-label="Pile keyplan"></canvas>
+          <div class="zoom-ctl" role="group" aria-label="Zoom">
+            <button type="button" id="pzoom-in" aria-label="Zoom in">+</button>
+            <button type="button" id="pzoom-out" aria-label="Zoom out">−</button>
+            <button type="button" id="pzoom-fit" aria-label="Show whole block" class="fit">
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg>
+            </button>
+          </div>
+          <div class="titleblock" id="ptitleblock" aria-label="Legend"></div>
+          <p class="canvas-hint" id="pcanvas-hint">Drag to move · scroll or pinch to zoom · tap a pile to select it</p>
+          <div class="pempty" id="pempty" hidden></div>
+        </div>
+        <aside class="panel" id="ppanel" aria-label="Selected pile"></aside>
+      </div>
+    </div>
+    <div id="pile-page" class="pview view-page" hidden><div class="page" id="ppage"></div></div>
   </section>
 
   <!-- Admin view -->

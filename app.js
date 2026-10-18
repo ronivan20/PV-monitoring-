@@ -5,7 +5,10 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 7;
+  var DB_VERSION = 8;
+  // the table screens also work on update 7, so the site can be published before update 8 is run;
+  // the Piles page then asks for update 8
+  var MIN_DB_VERSION = 7;
   var CM_STATUS = { open: 'Open', in_progress: 'In progress', responded: 'Responded', closed: 'Closed' };
   var CCI = ['not_inspected', 'in_progress', 'pending_approval', 'approved', 'rejected', 'reinspection'];
   var CCI_LABEL = { not_inspected: 'Not Yet Inspected', in_progress: 'Inspection in Progress', pending_approval: 'Inspected – Pending Approval',
@@ -248,6 +251,7 @@
   function resetScreenState() {
     S.selected = null; S.mode = 'details'; S.form = null; S.admin.users = null; S.admin.log = null;
     S.multi.clear(); S.multiFresh = false; S.pick = null; S.highlight = null;
+    if (window.PVMPiles && window.PVMPiles.reset) window.PVMPiles.reset();
   }
   function signedOut(message) {
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
@@ -289,11 +293,12 @@
 
   function loadBootstrap() {
     return rpc('get_bootstrap', { p_token: S.token }).then(function (d) {
-      if (d.version !== DB_VERSION) {
-        throw ApiError(d.version < DB_VERSION
+      if (d.version < MIN_DB_VERSION || d.version > DB_VERSION) {
+        throw ApiError(d.version < MIN_DB_VERSION
           ? 'The database needs the latest update (update ' + DB_VERSION + '). Ask the administrator to run it, then reload this page.'
           : 'A newer version of this app is available. Reload the page.', 'version', 0);
       }
+      S.dbVersion = d.version;
       S.siteDate = d.site_date || null;
       if (Array.isArray(d.palette) && d.palette.length) PALETTE = d.palette.map(function (c) { return String(c).toLowerCase(); });
       S.kp = {};
@@ -371,7 +376,8 @@
     $('#user-pop-role').textContent = ROLE_LABEL[u.role] + (u.company_name ? ' · ' + u.company_name : '');
     $('#tab-admin').hidden = u.role !== 'admin';
     $('#btn-scope').hidden = u.role !== 'subcontractor';
-    if (prev && (prev.role !== u.role || prev.can_assign !== u.can_assign || prev.company_id !== u.company_id)) {
+    if (prev && (prev.role !== u.role || prev.can_assign !== u.can_assign || prev.company_id !== u.company_id || prev.can_record_cci !== u.can_record_cci)) {
+      if (window.PVMPiles && window.PVMPiles.reset) { window.PVMPiles.reset(); if (S.page === 'piles') window.PVMPiles.show(true); }
       if (S.page === 'admin' && u.role !== 'admin') setPage('keyplan');
       if (!canAssign()) { S.pick = null; S.multi.clear(); }
       if (S.mode !== 'details') { S.mode = 'details'; S.form = null; }
@@ -392,7 +398,11 @@
     $('#view-keyplan').hidden = v !== 'keyplan';
     $('#view-dashboard').hidden = v !== 'dashboard';
     $('#view-admin').hidden = v !== 'admin';
-    if (v === 'keyplan') {
+    var pv = $('#view-piles'); if (pv) pv.hidden = v !== 'piles';
+    if (v !== 'piles' && window.PVMPiles && window.PVMPiles.hide) window.PVMPiles.hide();
+    if (v === 'piles') {
+      if (window.PVMPiles && window.PVMPiles.show) window.PVMPiles.show(changed || force);
+    } else if (v === 'keyplan') {
       renderToolbar();
       if (KP.block !== S.block) buildKeyplan();
       else if (KP.stale) rebuildKeyplan();
@@ -1484,6 +1494,7 @@
     if (!S.token || !S.user || S.polling) return Promise.resolve();
     if (document.hidden && !force) return Promise.resolve();
     S.polling = true;
+    if (S.page === 'piles' && window.PVMPiles && window.PVMPiles.poll) window.PVMPiles.poll(force);
     return call('get_changes', { p_since: S.serverTime }).then(function (d) {
       S.serverTime = d.server_time; S.lastSync = new Date(); S.syncErr = false;
       loadComments().then(function (changed) {
@@ -1528,6 +1539,7 @@
       renderPanel();
     } else if (S.page === 'dashboard') renderDashboard();
     else if (S.page === 'admin') renderAdmin();
+    else if (S.page === 'piles' && window.PVMPiles && window.PVMPiles.render) window.PVMPiles.render();
   }
   function renderSync() {
     var el = $('#sync'); if (!el) return;
@@ -2797,7 +2809,7 @@
     var fAsg = h('input', { id: 'e-assign', type: 'checkbox', checked: !!u.can_assign });
     var asgRow = h('label', { class: 'check' }, fAsg, h('span', { text: 'Allow this subcontractor to assign and reassign contractors' }));
     var fCci = h('input', { id: 'e-cci', type: 'checkbox', checked: !!u.can_record_cci });
-    var cciRow = h('label', { class: 'check' }, fCci, h('span', { text: 'May record official CCI inspection and approval results' }));
+    var cciRow = h('label', { class: 'check' }, fCci, h('span', { text: 'May record official CCI inspection and approval results (tables and piles)' }));
     var fRfi = h('input', { id: 'e-rfi', type: 'checkbox', checked: !!u.can_manage_rfi });
     var rfiRow = h('label', { class: 'check' }, fRfi, h('span', { text: 'May edit and remove RFI assignments on sections' }));
     function syncRole() { asgRow.hidden = fRole.value !== 'subcontractor'; cciRow.hidden = ['viewer', 'client'].indexOf(fRole.value) < 0; rfiRow.hidden = fRole.value === 'admin'; }
@@ -3263,4 +3275,12 @@
     wireCanvas();
     wireSearch();
   }
+
+  // shared with the Piles module (piles.js, update 8)
+  window.PVM = {
+    S: S, h: h, $: $, $$: $$, svg: svg, append: append, rpc: rpc, call: call, toast: toast, openModal: openModal, closeModal: closeModal,
+    fmtTime: fmtTime, fmtDate: fmtDate, fmtPct: fmtPct, pct1: pct1, addDays: addDays, plural: plural, natKey: natKey, cmpCode: cmpCode,
+    company: company, companyName: companyName, colorOf: colorOf, activeCompanies: activeCompanies, cchip: cchip, tgtIndicator: tgtIndicator,
+    isAdmin: isAdmin, isSub: isSub, isClient: isClient, download: download, stamp: stamp, prefs: prefs, savePrefs: savePrefs, setPage: setPage
+  };
 })();
