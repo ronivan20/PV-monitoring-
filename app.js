@@ -5,7 +5,7 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 8;
+  var DB_VERSION = 9;
   // the table screens also work on update 7, so the site can be published before update 8 is run;
   // the Piles page then asks for update 8
   var MIN_DB_VERSION = 7;

@@ -672,9 +672,9 @@ input[type="color"] { width: 52px; height: 38px; padding: 2px; }
   background: var(--surface); border: 1px solid var(--ink); border-radius: 10px; padding: 16px 18px; display: grid; gap: 8px; font-size: 14px; text-align: left;
 }
 .pempty .btn { justify-self: start; }
-.sw.psw { background: var(--c, #c3cad2); border-radius: 50%; }
-.psw-ring { width: 16px; height: 16px; border-radius: 50%; border: 2.5px solid #c0262d; background: #fff; display: inline-block; flex: none; }
-.psw-off { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid #7a8692; background: #fff; display: inline-block; flex: none; }
+.sw.psw { background: var(--c, #c3cad2); border-radius: 3px; }
+.psw-ring { width: 16px; height: 16px; border-radius: 3px; border: 2.5px solid #c0262d; background: #fff; display: inline-block; flex: none; }
+.psw-off { width: 16px; height: 16px; border-radius: 3px; border: 1.5px solid #7a8692; background: #fff; display: inline-block; flex: none; }
 .pchip {
   display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-weight: 700; font-size: 13px; line-height: 22px;
   background: var(--c, #c3cad2); color: var(--ink); border: 1px solid rgba(21, 33, 44, .25); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;

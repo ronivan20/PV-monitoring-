@@ -71,7 +71,7 @@
     PS.notInspected = PS.istatuses.filter(function (s) { return s.category === 'not_inspected'; })[0] || { id: 0, label: 'Not Yet Inspected', color: '#e2e6ea', category: 'not_inspected' };
     PS.areas = d.work_areas || []; PS.areaById = new Map(); PS.areas.forEach(function (a) { PS.areaById.set(a.id, a); });
     PS.origins = {}; (d.origins || []).forEach(function (o) { PS.origins[o.block] = { x: +o.x, y: +o.y }; });
-    PS.piles = (d.piles || []).map(function (a) { return { id: a[0], code: a[1], block: a[2], area: a[3], x: +a[4], y: +a[5], table: a[6], active: !!a[7] }; });
+    PS.piles = (d.piles || []).map(function (a) { return { id: a[0], code: a[1], block: a[2], area: a[3], x: +a[4], y: +a[5], table: a[6], active: !!a[7], sec: a[8] }; });
     PS.byId = new Map(); PS.byBlock = { 1: [], 5: [] };
     PS.piles.forEach(function (p) { PS.byId.set(p.id, p); (PS.byBlock[p.block] = PS.byBlock[p.block] || []).push(p); });
     PS.cur = new Map(); (d.current || []).forEach(function (c) { PS.cur.set(c[0], { uid: c[1], sid: c[2] }); });
@@ -241,12 +241,12 @@
   // ------------------------------------------------------------------
   Pi.show = function (force) {
     PS.visible = true;
-    if (S.dbVersion && S.dbVersion < 8) {
+    if (S.dbVersion && S.dbVersion < 9) {
       // site published before the database update: explain instead of failing
       PS.sub = 'keyplan'; renderShell();
       var em = $('#pempty'); em.hidden = false; em.textContent = '';
-      ap(em, h('strong', { text: 'The Piles module needs database update 8.' }),
-        h('span', { text: isAdmin() ? ' Run pv-monitoring-update-8.sql in the Supabase SQL Editor, then reload this page. The table keyplan keeps working meanwhile.'
+      ap(em, h('strong', { text: 'The Piles module needs database update 9.' }),
+        h('span', { text: isAdmin() ? ' Run pv-monitoring-update-9.sql in the Supabase SQL Editor, then reload this page. The table keyplan keeps working meanwhile.'
           : ' Ask the administrator to install it. The table keyplan works as usual.' }));
       return;
     }
@@ -257,7 +257,7 @@
     if (PS.sub === 'setup' && !isAdmin()) PS.sub = 'keyplan';
     if (!PS.loaded) {
       renderShell();
-      $('#pempty').hidden = false; $('#pempty').textContent = 'Loading piles…';
+      $('#pempty').hidden = false; $('#pempty').textContent = 'Loading sections…';
       loadPiles().then(function () { PS.firstFit = true; loadMyTarget(); render(); }, function (e) {
         $('#pempty').hidden = false; $('#pempty').textContent = e.message;
       });
@@ -342,7 +342,7 @@
       filtersActive() ? h('button', { type: 'button', class: 'btn small ghost', text: 'Clear filters', onclick: function () { PS.f = { area: 'all', company: 'all', status: 'all' }; PK.stale = true; render(); } }) : null);
     var c = counts(scopeList(PS.block));
     var stats = h('div', { class: 'pstats', 'aria-label': 'Pile totals' },
-      stat('Total piles', c.total), stat('Reported complete', c.reported), stat('Accepted', c.cat.accepted || 0), stat('Remaining', c.remaining),
+      stat('Total sections', c.total), stat('Reported complete', c.reported), stat('Accepted', c.cat.accepted || 0), stat('Remaining', c.remaining),
       stat('On hold', c.cat.on_hold || 0), stat('Pile refusal', c.cat.refusal || 0), stat('Rectification', c.cat.rectification || 0),
       c.cases ? stat('Open cases', c.cases) : null, c.off ? stat('Out of scope', c.off) : null);
     ap(box, stats);
@@ -383,11 +383,8 @@
     empty.hidden = !none;
     if (none) {
       empty.textContent = '';
-      ap(empty, h('strong', { text: 'No pile layout has been imported yet.' }),
-        h('span', { text: isAdmin() ? ' The keyplan drawing has no pile data. Import the pile list (Excel or CSV with pile ID, block, X and Y) under Pile setup.'
-          : isSub() ? ' No piles are assigned to your company yet, or the pile layout has not been imported. Ask the administrator.'
-            : ' The administrator has not imported the pile list yet.' }),
-        isAdmin() ? h('button', { type: 'button', class: 'btn small primary', text: 'Open pile setup', onclick: function () { setSub('setup'); } }) : null);
+      ap(empty, h('strong', { text: isSub() ? 'No sections are assigned to your company for pile installation yet.' : 'No table sections to show.' }),
+        h('span', { text: isSub() ? ' Ask the administrator to assign them on the pile keyplan.' : ' Sections get a pile record once they have a section ID.' }));
     }
     if (first) requestAnimationFrame(function () { if (!(isSub() && fitScope(false))) fitView(false); PS.firstFit = false; });
   }
@@ -433,56 +430,37 @@
       });
       ctx.restore();
     }
-    // piles
-    var rpx = Math.max(2.4, Math.min(8, ppu * 0.32)), ru = rpx * px;
-    var m = ru * 3;
-    function inView(p) { return p.x >= x0 - m && p.x <= x1 + m && p.y >= y0 - m && p.y <= y1 + m; }
-    function dots(list) {
+    // sections coloured by their pile status
+    var m = 2;
+    function inView(p) { var g = gOf(p); return g && g[0] <= x1 + m && g[1] <= y1 + m && g[0] + g[2] >= x0 - m && g[1] + g[3] >= y0 - m; }
+    function rects(list, grow) {
       ctx.beginPath();
-      list.forEach(function (p) { if (!inView(p)) return; ctx.moveTo(p.x + ru, p.y); ctx.arc(p.x, p.y, ru, 0, 6.2832); });
+      list.forEach(function (p) { if (!inView(p)) return; var g = gOf(p); ctx.rect(g[0] - grow, g[1] - grow, g[2] + 2 * grow, g[3] + 2 * grow); });
     }
     var G = PK.groups || { byColor: new Map(), dim: [], off: [] };
     if (G.dim.length) {
-      ctx.globalAlpha = 0.22; dots(G.dim); ctx.fillStyle = '#9aa5b0'; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.globalAlpha = 0.22; rects(G.dim, 0); ctx.fillStyle = '#9aa5b0'; ctx.fill(); ctx.globalAlpha = 1;
     }
-    var outline = rpx >= 3.2;
     G.byColor.forEach(function (list, col) {
-      dots(list); ctx.fillStyle = col; ctx.fill();
-      if (outline) { ctx.lineWidth = px; ctx.strokeStyle = 'rgba(21,33,44,.6)'; ctx.stroke(); }
+      rects(list, 0); ctx.fillStyle = col; ctx.fill();
+      ctx.lineWidth = px; ctx.strokeStyle = 'rgba(21,33,44,.55)'; ctx.stroke();
     });
-    if (G.off.length) { dots(G.off); ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.lineWidth = 1.2 * px; ctx.strokeStyle = '#7a8692'; ctx.stroke(); }
-    // open refusal / rectification cases: red ring
-    ctx.beginPath();
-    (PS.byBlock[PS.block] || []).forEach(function (p) {
-      if (!openCases(p).length || !inView(p)) return;
-      ctx.moveTo(p.x + ru + 2.6 * px, p.y); ctx.arc(p.x, p.y, ru + 2.6 * px, 0, 6.2832);
-    });
-    ctx.lineWidth = 2 * px; ctx.strokeStyle = '#c0262d'; ctx.stroke();
+    if (G.off.length) { rects(G.off, 0); ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.lineWidth = 1.2 * px; ctx.strokeStyle = '#7a8692'; ctx.stroke(); }
+    // open refusal / rectification cases: red outline
+    rects((PS.byBlock[PS.block] || []).filter(function (p) { return openCases(p).length; }), 1.6 * px);
+    ctx.lineWidth = 2.4 * px; ctx.strokeStyle = '#c0262d'; ctx.stroke();
     // selection
     if (PS.multi.size) {
-      ctx.beginPath();
-      PS.multi.forEach(function (id) { var p = PS.byId.get(id); if (!p || p.block !== PS.block || !inView(p)) return; ctx.moveTo(p.x + ru + 1.8 * px, p.y); ctx.arc(p.x, p.y, ru + 1.8 * px, 0, 6.2832); });
-      ctx.lineWidth = 2.6 * px; ctx.strokeStyle = '#1d5bd8'; ctx.stroke();
+      var ml = []; PS.multi.forEach(function (id) { var p = PS.byId.get(id); if (p && p.block === PS.block) ml.push(p); });
+      rects(ml, 0.9 * px); ctx.lineWidth = 2.6 * px; ctx.strokeStyle = '#1d5bd8'; ctx.stroke();
     }
-    // labels when zoomed in far enough
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (ppu >= 30) {
-      var vis = (PS.byBlock[PS.block] || []).filter(inView);
-      if (vis.length <= 500) {
-        ctx.font = '10px ' + getComputedStyle(document.body).fontFamily; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.lineWidth = 3; ctx.strokeStyle = '#ffffff'; ctx.fillStyle = '#15212c';
-        vis.forEach(function (p) {
-          var sx = (p.x - v.x) * ppu + rpx + 3, sy = (p.y - v.y) * ppu;
-          ctx.strokeText(p.code, sx, sy); ctx.fillText(p.code, sx, sy);
-        });
-      }
-    }
-    var sp = PS.byId.get(PS.sel);
-    if (sp && sp.block === PS.block) {
-      var sx = (sp.x - v.x) * ppu, sy = (sp.y - v.y) * ppu;
-      ctx.beginPath(); ctx.arc(sx, sy, rpx + 5, 0, 6.2832); ctx.lineWidth = 3; ctx.strokeStyle = '#1d5bd8'; ctx.stroke();
+    var sp = PS.byId.get(PS.sel), sg = sp && gOf(sp);
+    if (sp && sg && sp.block === PS.block) {
+      var sx0 = (sg[0] - v.x) * ppu, sy0 = (sg[1] - v.y) * ppu, sw0 = sg[2] * ppu, sh0 = sg[3] * ppu;
+      ctx.lineWidth = 3; ctx.strokeStyle = '#1d5bd8'; ctx.strokeRect(sx0 - 3, sy0 - 3, sw0 + 6, sh0 + 6);
       ctx.font = '700 13px ' + getComputedStyle(document.body).fontFamily;
-      var tw = ctx.measureText(sp.code).width + 14, th = 22, tx = sx - tw / 2, ty = sy - rpx - 10 - th;
+      var sx = sx0 + sw0 / 2, tw = ctx.measureText(sp.code).width + 14, th = 22, tx = sx - tw / 2, ty = sy0 - 10 - th;
       ctx.fillStyle = '#1d5bd8'; roundRect(ctx, tx, ty, tw, th, 4); ctx.fill();
       ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(sp.code, sx, ty + th / 2);
     }
@@ -493,7 +471,7 @@
       ctx.setLineDash([6 * px, 4 * px]); ctx.lineWidth = 2 * px; ctx.strokeStyle = '#1d5bd8';
       ctx.strokeRect(Math.min(a.a.x, a.b.x), Math.min(a.a.y, a.b.y), Math.abs(a.a.x - a.b.x), Math.abs(a.a.y - a.b.y)); ctx.setLineDash([]);
     }
-    PK.cv.setAttribute('aria-label', 'Pile keyplan Block ' + PS.block + ' · ' + (PS.disp === 'contractor' ? 'contractors' : PS.disp === 'inspection' ? 'inspection status' : 'installation status') + ' · ' + plural((PS.byBlock[PS.block] || []).length, 'pile'));
+    PK.cv.setAttribute('aria-label', 'Pile keyplan Block ' + PS.block + ' · ' + (PS.disp === 'contractor' ? 'contractors' : PS.disp === 'inspection' ? 'inspection status' : 'installation status') + ' · ' + plural((PS.byBlock[PS.block] || []).length, 'section'));
   }
   function roundRect(ctx, x, y, w, hh, r) {
     ctx.beginPath(); ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r); ctx.lineTo(x + w, y + hh - r);
@@ -578,15 +556,15 @@
       animateTo(clampCenter({ x: p.x - v.w / 2, y: p.y - (v.h - cover) / 2, w: v.w, h: v.h }));
     }
   }
-  // nearest pile to a screen point (generous touch radius)
+  // section under a screen point (or the nearest one within a finger's reach)
+  function gOf(p) { var x = p && S.sections.get(p.sec); return x ? x.geom : null; }
   function hitTest(cx, cy) {
-    var u = toUser(cx, cy), ppu = ppuNow(), rad = Math.max(0.9, 16 / ppu), best = null, bd = Infinity;
-    var gx = Math.floor(u.x / 5), gy = Math.floor(u.y / 5), span = Math.ceil(rad / 5);
-    for (var i = gx - span; i <= gx + span; i++) for (var j = gy - span; j <= gy + span; j++) {
-      (PK.grid.get(PS.block + ':' + i + ':' + j) || []).forEach(function (p) {
-        var d = Math.hypot(p.x - u.x, p.y - u.y); if (d <= rad && d < bd) { bd = d; best = p; }
-      });
-    }
+    var u = toUser(cx, cy), ppu = ppuNow(), rad = Math.max(0.6, 12 / ppu), best = null, bd = Infinity;
+    (PS.byBlock[PS.block] || []).forEach(function (p) {
+      var g = gOf(p); if (!g) return;
+      var dx = Math.max(g[0] - u.x, 0, u.x - (g[0] + g[2])), dy = Math.max(g[1] - u.y, 0, u.y - (g[1] + g[3])), d = Math.hypot(dx, dy);
+      if (d <= rad && d < bd) { bd = d; best = p; }
+    });
     return best;
   }
   function pilesInRect(a, b) {
@@ -720,12 +698,12 @@
     if (cs) ap(rows, h('div', null, h('span', { class: 'psw-ring' })), h('div', { text: 'Open refusal / rectification case' }), h('div', { class: 'num', text: String(cs) }));
     if (off) ap(rows, h('div', null, h('span', { class: 'psw-off' })), h('div', { text: 'Out of scope (not counted)' }), h('div', { class: 'num', text: String(off) }));
     ap(tb, h('div', { class: 'tb-head' },
-      h('div', { class: 'tb-blk', text: 'Block ' + PS.block + ' · piles' }), h('div', { class: 'tnum', text: plural(L.total, 'pile') }),
+      h('div', { class: 'tb-blk', text: 'Block ' + PS.block + ' · sections' }), h('div', { class: 'tnum', text: plural(L.total, 'section') }),
       h('div', { class: 'tb-act' }, h('strong', { text: L.kind }), filtersActive() ? h('span', { class: 'tb-note', text: 'filtered' }) : null)),
       rows,
       h('div', { class: 'tb-foot' }, h('span', { text: L.foot[0] }), h('strong', { class: 'tnum', text: L.foot[1] })));
     var strip = $('#plegend-strip'); strip.textContent = '';
-    ap(strip, h('span', { class: 'ls-title', text: 'B' + PS.block + ' · ' + (PS.disp === 'contractor' ? 'contractors' : PS.disp === 'inspection' ? 'inspection' : 'piles') }));
+    ap(strip, h('span', { class: 'ls-title', text: 'B' + PS.block + ' · ' + (PS.disp === 'contractor' ? 'contractors' : PS.disp === 'inspection' ? 'inspection' : 'sections') }));
     L.rows.forEach(function (r) { ap(strip, h('span', { class: 'ls-item' }, sw(r.color), r.label + ' ', h('b', { text: String(r.n) }))); });
     if (cs) ap(strip, h('span', { class: 'ls-item' }, h('span', { class: 'psw-ring' }), 'Open case ', h('b', { text: String(cs) })));
   }
@@ -748,7 +726,7 @@
     }
   }
   function openPile(id) {
-    var p = PS.byId.get(id); if (!p) { toast('That pile is not in your view.', 'err'); return; }
+    var p = PS.byId.get(id); if (!p) { toast('That section is not in your view.', 'err'); return; }
     PS.tool = null; PS.multi.clear();
     if (PS.block !== p.block) { PS.block = p.block; X.savePrefs({ pblock: p.block }); }
     PS.sub = 'keyplan'; PK.stale = true; render(true);
@@ -762,8 +740,8 @@
   function areaSelect(hit) {
     var all = hit.filter(passes), ok = all.filter(function (p) { return toolAllows(PS.tool, p); });
     ok.forEach(function (p) { PS.multi.add(p.id); });
-    if (!hit.length) toast('No piles inside that area. Draw a box around the piles.', 'err');
-    else if (ok.length < all.length) toast(plural(all.length - ok.length, 'pile') + ' in the box ' + (all.length - ok.length === 1 ? 'is' : 'are') + ' not yours to select here and ' + (all.length - ok.length === 1 ? 'was' : 'were') + ' left out.', 'err', 5000);
+    if (!hit.length) toast('No sections inside that area. Draw a box around the sections.', 'err');
+    else if (ok.length < all.length) toast(plural(all.length - ok.length, 'section') + ' in the box ' + (all.length - ok.length === 1 ? 'is' : 'are') + ' not yours to select here and ' + (all.length - ok.length === 1 ? 'was' : 'were') + ' left out.', 'err', 5000);
     drawKP(); renderPanel();
   }
   function panelTop() { var pp = $('#ppanel'); if (pp) pp.scrollTop = 0; }
@@ -791,7 +769,7 @@
   }
   function toolButtons() {
     var b = [];
-    if (settable().length && (official() || isSub())) b.push(h('button', { type: 'button', class: 'btn small', id: 'pbtn-bulk', text: 'Update several piles', onclick: function () { startTool('status'); } }));
+    if (settable().length && (official() || isSub())) b.push(h('button', { type: 'button', class: 'btn small', id: 'pbtn-bulk', text: 'Update several sections', onclick: function () { startTool('status'); } }));
     if (official()) b.push(h('button', { type: 'button', class: 'btn small', id: 'pbtn-insp', text: 'Record inspection', onclick: function () { startTool('inspect'); } }));
     if (isAdmin()) {
       b.push(h('button', { type: 'button', class: 'btn small', id: 'pbtn-assign', text: 'Assign contractors', onclick: function () { startTool('assign'); } }));
@@ -804,7 +782,7 @@
     var stack = h('div', { class: 'stack psummary' });
     if (isSub()) { var card = todayTargetCard(true); if (card) ap(stack, card); }
     ap(stack, h('div', null, h('h2', { text: 'Piles · Block ' + PS.block }),
-      h('p', { class: 'panel-sub', text: PS.piles.length ? (filtersActive() ? 'Filtered view. ' : '') + 'Tap a pile to see its details and history.' : 'No piles yet.' })));
+      h('p', { class: 'panel-sub', text: PS.piles.length ? (filtersActive() ? 'Filtered view. ' : '') + 'Tap a section to see its details and history.' : 'No sections yet.' })));
     if (list.length) {
       ap(stack, h('div', { class: 'summary-grid' },
         PS.statuses.filter(function (s) { return c.st.get(s.id); }).map(function (s) {
@@ -816,7 +794,6 @@
       h('p', { class: 'small', text: c.reported + ' of ' + c.total + ' reported complete (' + X.fmtPct(c.reported, c.total) + '), ' + (c.cat.accepted || 0) + ' accepted (' + X.fmtPct(c.cat.accepted || 0, c.total) + '). Remaining: ' + c.remaining + '.' }));
     }
     var tb = toolButtons(); if (tb) ap(stack, tb);
-    if (!PS.piles.length && isAdmin()) ap(stack, h('button', { type: 'button', class: 'btn primary', text: 'Import the pile list', onclick: function () { setSub('setup'); } }));
     ap(P, stack);
   }
 
@@ -837,10 +814,10 @@
   function renderDetails(P, p) {
     var d = PS.detail.get(p.id), st = stOf(p), cu = PS.cur.get(p.id), ins = inspOf(p), cs = openCases(p), co = coOf(p);
     var head = h('div', { class: 'panel-head' },
-      h('div', null, h('h2', { text: 'Pile' }), h('div', { class: 'panel-tid', text: p.code }), h('p', { class: 'panel-sub', text: placeLabel(p) })),
+      h('div', null, h('h2', { text: 'Section' }), h('div', { class: 'panel-tid', text: p.code }), h('p', { class: 'panel-sub', text: placeLabel(p) })),
       h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', text: '×', onclick: function () { selectPile(null); } }));
     var stack = h('div', { class: 'stack' }, head);
-    if (!p.active) ap(stack, h('div', { class: 'notice warn' }, h('strong', { text: 'Out of the monitoring scope' }), 'This pile is not counted and cannot be updated.'));
+    if (!p.active) ap(stack, h('div', { class: 'notice warn' }, h('strong', { text: 'Out of the monitoring scope' }), 'This section is not counted and cannot be updated.'));
     var hist = d && d !== 'loading' && d !== 'error' ? d.history : null, last = hist && hist[0];
     ap(stack, h('div', { class: 'act-card' },
       h('h3', { text: 'Installation status' }),
@@ -855,7 +832,7 @@
       h('div', null, iChip(ins)),
       PS.insp.get(p.id) && PS.insp.get(p.id).date ? h('p', { class: 'small', text: 'Inspected ' + fmtDate(PS.insp.get(p.id).date) }) : null,
       official() && p.active ? h('button', { type: 'button', class: 'btn', id: 'pbtn-inspect-one', text: 'Record inspection', onclick: function () { inspectionForm([p]); } }) : null,
-      !official() ? h('p', { class: 'small muted', text: 'Inspection results are recorded by the administrator or the authorised inspector. A completed pile is not accepted until they record it.' }) : null));
+      !official() ? h('p', { class: 'small muted', text: 'Inspection results are recorded by the administrator or the authorised inspector. A completed section is not accepted until they record it.' }) : null));
     var caseCard = h('div', { class: 'act-card' }, h('h3', { text: 'Refusal and rectification' }));
     if (cs.length) cs.forEach(function (c) { ap(caseCard, h('div', null, caseChip(c))); });
     else ap(caseCard, h('p', { class: 'small muted', text: 'No open case.' }));
@@ -870,24 +847,23 @@
   function updateNote(p) {
     if (!p.active) return 'Not in scope.';
     if (isSub() && catOf(p) === 'accepted') return 'Accepted / verified: only the administrator or the inspector can change it.';
-    if (isSub()) return 'This pile is not assigned to your company.';
-    if (!settable().length) return 'Your account can view piles but not update them.';
+    if (isSub()) return 'This section is not assigned to your company.';
+    if (!settable().length) return 'Your account can view sections but not update them.';
     return '';
   }
   function detailSections(stack, p, d) {
     var pd = d.pile;
-    ap(stack, box('Pile details', [kv([['Pile ID', pd.code], ['Block', String(pd.block)], ['Work area', pd.work_area || '—'], ['Table', pd.table_code || '—'],
-      ['Pile type', pd.pile_type || '—'], ['Design length', pd.design_length != null ? pd.design_length + ' m' : '—'],
+    ap(stack, box('Section details', [kv([['Section ID', pd.code], ['Block', String(pd.block)], ['Work area', pd.work_area || '—'], ['Table', pd.table_code || '—'],
       ['Drawing X / Y', (+pd.x).toFixed(3) + ' / ' + (+pd.y).toFixed(3)], pd.remarks ? ['Remarks', pd.remarks] : null,
       ['Contractor since', pd.assigned_at ? fmtTime(pd.assigned_at) + (pd.assigned_by ? ' (' + pd.assigned_by + ')' : '') : '—']]),
-      isAdmin() ? h('button', { type: 'button', class: 'btn small', id: 'pbtn-editpile', text: 'Edit pile details', onclick: function () { editPile(p, pd); } }) : null], true));
+      isAdmin() ? h('button', { type: 'button', class: 'btn small', id: 'pbtn-editpile', text: 'Edit section details', onclick: function () { editPile(p, pd); } }) : null], true));
     ap(stack, box('Status history (' + d.history.length + ')', d.history.length ? h('ul', { class: 'hist' }, d.history.map(function (u) {
       var s = PS.stById.get(u.status_id) || { color: '#999', label: u.status_label };
       return h('li', null,
         h('div', { class: 'hist-top' }, pchip(s.color, u.status_label), h('span', { class: 'hist-meta', text: 'from ' + (u.prev_label || 'Not Started') })),
         h('div', { class: 'hist-meta', text: fmtTime(u.created_at) + ' · ' + (u.full_name || u.username) + (u.company_name ? ' · ' + u.company_name : '') + (u.source !== 'manual' ? ' · via ' + u.source : '') }),
         u.remarks ? h('div', { class: 'hist-rem', text: u.remarks }) : null);
-    })) : h('p', { class: 'small muted', text: 'No status saved yet: the pile counts as Not Started.' }), true));
+    })) : h('p', { class: 'small muted', text: 'No status saved yet: the section counts as Not Started.' }), true));
     ap(stack, box('Inspection records (' + d.inspections.length + ')', d.inspections.length ? h('ul', { class: 'hist' }, d.inspections.map(function (i) {
       var s = PS.istById.get(i.status_id) || { color: '#999' };
       return h('li', null,
@@ -980,17 +956,17 @@
     var btn = h('button', { type: 'button', class: 'btn primary', id: 'pbtn-confirm', text: change.length ? 'Confirm and save ' + plural(change.length, 'update') : 'Nothing to save' });
     btn.disabled = !change.length;
     btn.addEventListener('click', function () { saveStatus(change, st, remarks, btn); });
-    openModal('Confirm ' + plural(change.length, 'pile update'), [
+    openModal('Confirm ' + plural(change.length, 'section update'), [
       h('dl', { class: 'confirm-dl' },
         h('dt', { text: 'New status' }), h('dd', null, stChip(st)),
-        h('dt', { text: 'Piles' }), h('dd', { text: String(change.length) + (same ? ' (' + same + ' already ' + st.label + ', not saved again)' : '') }),
+        h('dt', { text: 'Sections' }), h('dd', { text: String(change.length) + (same ? ' (' + same + ' already ' + st.label + ', not saved again)' : '') }),
         h('dt', { text: 'Block' }), h('dd', { text: Array.from(blocks).sort().map(function (b) { return 'Block ' + b; }).join(', ') || '—' }),
         h('dt', { text: 'Contractor' }), h('dd', null, Array.from(byCo.entries()).map(function (e) { return h('span', { class: 'cchip-wrap' }, coChip(e[0]), ' ' + e[1] + ' '); })),
         h('dt', { text: 'Previous status' }), h('dd', { text: Array.from(prev.entries()).map(function (e) { return e[0] + ' ' + e[1]; }).join(' · ') || '—' }),
         remarks ? h('dt', { text: 'Remarks' }) : null, remarks ? h('dd', { text: remarks }) : null),
-      h('p', { class: 'small', text: 'Pile IDs:' }),
+      h('p', { class: 'small', text: 'Section IDs:' }),
       h('div', { class: 'sel-list bulk-ids', text: change.map(function (p) { return p.code; }).join(', ') || '—' }),
-      h('p', { class: 'small muted', text: 'Only these piles change. Inspection records, contractor assignments and earlier remarks are kept.' + (st.category === 'completed' ? ' Completed piles still need the inspector\'s acceptance.' : '') }),
+      h('p', { class: 'small muted', text: 'Only these sections change. Inspection records, contractor assignments and earlier remarks are kept.' + (st.category === 'completed' ? ' Completed sections still need the inspector\'s acceptance.' : '') }),
       h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Back', onclick: closeModal }))]);
   }
   function saveStatus(list, st, remarks, btn) {
@@ -1000,7 +976,7 @@
     var ids = list.map(function (p) { return p.id; });
     call('submit_pile_updates', { p_pile_ids: ids, p_status_id: st.id, p_remarks: remarks || null, p_expected: expected }).then(function (r) {
       closeModal();
-      toast('Saved: ' + plural(r.changed, 'pile') + ' now ' + st.label + (r.unchanged ? ' (' + r.unchanged + ' unchanged)' : '') + '.', 'ok', 7000);
+      toast('Saved: ' + plural(r.changed, 'section') + ' now ' + st.label + (r.unchanged ? ' (' + r.unchanged + ' unchanged)' : '') + '.', 'ok', 7000);
       PS.form = null; PS.multi.clear(); PS.bulkStatus = null; PS.bulkRemarks = '';
       ids.forEach(function (id) { PS.detail.delete(id); });
       return refreshAfterSave(false).then(function () { if (PS.sel) loadDetail(PS.sel, true); });
@@ -1012,24 +988,24 @@
   }
 
   // ---- tools: several piles (status, assign, inspection, work area)
-  var TOOL_TITLE = { status: 'Update several piles', assign: 'Assign contractors', inspect: 'Record inspection', area: 'Set work area' };
+  var TOOL_TITLE = { status: 'Update several sections', assign: 'Assign contractors', inspect: 'Record inspection', area: 'Set work area' };
   function renderTool(P) {
     var t = PS.tool, sel = selection();
     var stack = h('div', { class: 'stack ptool' });
     if (t === 'status' && isSub()) { var card = todayTargetCard(true); if (card) ap(stack, card); }
     ap(stack, h('div', null, h('h2', { text: TOOL_TITLE[t] + ' · Block ' + PS.block }),
-      h('p', { class: 'panel-sub', text: t === 'status' ? 'Select the piles, choose the new status, review, then confirm.' : t === 'assign' ? 'Select piles by tapping, drawing a box, a work area or the whole block.'
-        : t === 'inspect' ? 'Select the inspected piles, then fill in the inspection result.' : 'Select piles and choose their work area.' })));
+      h('p', { class: 'panel-sub', text: t === 'status' ? 'Select the sections, choose the new status, review, then confirm.' : t === 'assign' ? 'Select sections by tapping, drawing a box, a work area or the whole block.'
+        : t === 'inspect' ? 'Select the inspected sections, then fill in the inspection result.' : 'Select sections and choose their work area.' })));
     ap(stack, h('div', { class: 'tool-row' },
       h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(PS.pick === 'tap'), text: 'Tap to select', onclick: function () { PS.pick = 'tap'; renderPanel(); } }),
       h('button', { type: 'button', class: 'btn small', 'aria-pressed': String(PS.pick === 'area'), id: 'pbtn-drawarea', text: 'Draw an area', onclick: function () { PS.pick = 'area'; renderPanel(); } })),
       h('div', { class: 'tool-row' },
-        h('button', { type: 'button', class: 'btn small', id: 'pbtn-selall', text: 'Select all shown', title: 'All piles in this block that match the filters and that you may select', onclick: function () {
+        h('button', { type: 'button', class: 'btn small', id: 'pbtn-selall', text: 'Select all shown', title: 'All sections in this block that match the filters and that you may select', onclick: function () {
           var n = 0; (PS.byBlock[PS.block] || []).forEach(function (p) { if (passes(p) && toolAllows(t, p) && !PS.multi.has(p.id)) { PS.multi.add(p.id); n++; } });
-          if (!n) toast('No more piles to select with these filters.', 'err');
+          if (!n) toast('No more sections to select with these filters.', 'err');
           drawKP(); renderPanel();
         } }),
-        h('button', { type: 'button', class: 'btn small', id: 'pbtn-deselall', text: 'Deselect all shown', title: 'Remove the piles that match the filters from the selection', onclick: function () {
+        h('button', { type: 'button', class: 'btn small', id: 'pbtn-deselall', text: 'Deselect all shown', title: 'Remove the sections that match the filters from the selection', onclick: function () {
           (PS.byBlock[PS.block] || []).forEach(function (p) { if (passes(p)) PS.multi.delete(p.id); }); drawKP(); renderPanel();
         } }),
         h('button', { type: 'button', class: 'btn small ghost', id: 'pbtn-clearsel', text: 'Clear selection', onclick: function () { PS.multi.clear(); drawKP(); renderPanel(); } })));
@@ -1044,10 +1020,10 @@
       ap(stack, h('div', { class: 'tool-row' }, areas.length ? aSel : null,
         h('button', { type: 'button', class: 'btn small', id: 'pbtn-wholeblock', text: 'Whole Block ' + PS.block, onclick: function () { (PS.byBlock[PS.block] || []).forEach(function (p) { PS.multi.add(p.id); }); drawKP(); renderPanel(); } })));
     }
-    ap(stack, h('p', { class: 'mode-note', text: PS.pick === 'area' ? 'Drag a box on the keyplan. Piles you may select inside it (and matching the filters) are added.' : 'Tap piles to add or remove them.' }),
-      h('div', { class: 'sel-count', id: 'psel-count', text: sel.length ? plural(sel.length, 'pile') + ' selected' : 'No piles selected' }));
+    ap(stack, h('p', { class: 'mode-note', text: PS.pick === 'area' ? 'Drag a box on the keyplan. Sections you may select inside it (and matching the filters) are added.' : 'Tap sections to add or remove them.' }),
+      h('div', { class: 'sel-count', id: 'psel-count', text: sel.length ? plural(sel.length, 'section') + ' selected' : 'No sections selected' }));
     var otherBlock = Array.from(PS.multi).filter(function (id) { var p = PS.byId.get(id); return p && p.block !== PS.block; }).length;
-    if (otherBlock) ap(stack, h('p', { class: 'small muted', text: plural(otherBlock, 'pile') + ' selected in the other block ' + (otherBlock === 1 ? 'is' : 'are') + ' included.' }));
+    if (otherBlock) ap(stack, h('p', { class: 'small muted', text: plural(otherBlock, 'section') + ' selected in the other block ' + (otherBlock === 1 ? 'is' : 'are') + ' included.' }));
     if (sel.length) {
       ap(stack, h('div', { class: 'sel-list', text: sel.slice(0, 80).map(function (p) { return p.code; }).join(', ') + (sel.length > 80 ? ' …' : '') }));
       if (t === 'status') toolStatus(stack, sel);
@@ -1071,7 +1047,7 @@
     rm.value = PS.bulkRemarks || ''; rm.addEventListener('input', function () { PS.bulkRemarks = rm.value; });
     ap(stack, h('div', { class: 'field' }, h('label', { for: 'pbulk-remarks', text: 'Remarks' }), rm),
       h('button', { type: 'button', class: 'btn primary', id: 'pbtn-bulk-review', disabled: !PS.bulkStatus, text: PS.bulkStatus ? 'Review ' + plural(sel.length, 'update') : 'Choose the new status',
-        onclick: function () { if (sel.length > 3000) { toast('Select at most 3000 piles at a time.', 'err'); return; } reviewStatus(sel, PS.bulkStatus, PS.bulkRemarks); } }));
+        onclick: function () { if (sel.length > 3000) { toast('Select at most 3000 sections at a time.', 'err'); return; } reviewStatus(sel, PS.bulkStatus, PS.bulkRemarks); } }));
   }
   function toolAssign(stack, sel) {
     var by = new Map(); sel.forEach(function (p) { var c = coOf(p); by.set(c, (by.get(c) || 0) + 1); });
@@ -1085,49 +1061,49 @@
           if (!co.value) { toast('Choose the contractor.', 'err'); return; } reviewAssign(sel, +co.value, false);
         } }),
         h('button', { type: 'button', class: 'btn danger', id: 'pbtn-unassign', text: 'Remove contractor', onclick: function () { reviewAssign(sel, null, false); } })),
-      h('p', { class: 'small muted', text: 'Reassigning keeps each pile\'s status and history; earlier work stays recorded under the contractor who did it.' }));
+      h('p', { class: 'small muted', text: 'Reassigning keeps each section\'s status and history; earlier work stays recorded under the contractor who did it.' }));
   }
   function reviewAssign(sel, cid, allow) {
     var change = sel.filter(function (p) { return coOf(p) !== cid; });
     var other = change.filter(function (p) { return coOf(p) && cid; });
-    var btn = h('button', { type: 'button', class: 'btn primary', id: 'pbtn-assign-confirm', text: change.length ? (cid ? 'Confirm: assign ' : 'Confirm: remove contractor from ') + plural(change.length, 'pile') : 'Nothing to change' });
+    var btn = h('button', { type: 'button', class: 'btn primary', id: 'pbtn-assign-confirm', text: change.length ? (cid ? 'Confirm: assign ' : 'Confirm: remove contractor from ') + plural(change.length, 'section') : 'Nothing to change' });
     btn.disabled = !change.length;
     btn.addEventListener('click', function () {
       btn.disabled = true; btn.textContent = 'Saving…';
       call('assign_piles', { p_pile_ids: change.map(function (p) { return p.id; }), p_company_id: cid, p_allow_reassign: allow || !!other.length }).then(function (r) {
-        closeModal(); toast((cid ? 'Assigned ' + plural(r.changed, 'pile') + ' to ' + companyName(cid) : 'Removed the contractor from ' + plural(r.changed, 'pile')) + '.', 'ok', 6000);
+        closeModal(); toast((cid ? 'Assigned ' + plural(r.changed, 'section') + ' to ' + companyName(cid) : 'Removed the contractor from ' + plural(r.changed, 'section')) + '.', 'ok', 6000);
         PS.multi.clear(); return refreshAfterSave(true);
       }).catch(function (e) { closeModal(); if (e.hint !== 'session') toast(e.message, 'err', 10000); });
     });
-    openModal(cid ? 'Assign ' + plural(change.length, 'pile') : 'Remove the contractor', [
+    openModal(cid ? 'Assign ' + plural(change.length, 'section') : 'Remove the contractor', [
       h('dl', { class: 'confirm-dl' },
         h('dt', { text: 'Contractor' }), h('dd', null, cid ? X.cchip(cid) : 'None (unassigned)'),
-        h('dt', { text: 'Piles' }), h('dd', { text: String(change.length) + (sel.length - change.length ? ' (' + (sel.length - change.length) + ' already so)' : '') })),
-      other.length ? h('div', { class: 'notice warn' }, h('strong', { text: plural(other.length, 'pile') + ' already ' + (other.length === 1 ? 'has' : 'have') + ' another contractor' }), 'They will be reassigned. Their history stays.') : null,
+        h('dt', { text: 'Sections' }), h('dd', { text: String(change.length) + (sel.length - change.length ? ' (' + (sel.length - change.length) + ' already so)' : '') })),
+      other.length ? h('div', { class: 'notice warn' }, h('strong', { text: plural(other.length, 'section') + ' already ' + (other.length === 1 ? 'has' : 'have') + ' another contractor' }), 'They will be reassigned. Their history stays.') : null,
       h('div', { class: 'sel-list bulk-ids', text: change.map(function (p) { return p.code; }).join(', ') || '—' }),
       h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Back', onclick: closeModal }))]);
   }
   function toolArea(stack, sel) {
     var a = h('select', { id: 'pt-workarea' }, [h('option', { value: '', text: 'No work area' })].concat(PS.areas.filter(function (x) { return x.block === PS.block && x.is_active; }).map(function (x) { return h('option', { value: x.id, text: x.name }); })));
-    ap(stack, h('div', { class: 'field' }, h('label', { for: 'pt-workarea', text: 'Work area for the selected piles' }), a),
+    ap(stack, h('div', { class: 'field' }, h('label', { for: 'pt-workarea', text: 'Work area for the selected sections' }), a),
       h('button', { type: 'button', class: 'btn primary', id: 'pbtn-area-review', text: 'Review', onclick: function () {
         var id = a.value ? +a.value : null, list = sel.filter(function (p) { return p.block === PS.block; });
         var btn = h('button', { type: 'button', class: 'btn primary', id: 'pbtn-area-confirm', text: 'Confirm and save' });
         btn.addEventListener('click', function () {
           btn.disabled = true;
           call('admin_set_pile_area', { p_pile_ids: list.map(function (p) { return p.id; }), p_work_area_id: id }).then(function (r) {
-            closeModal(); toast('Work area saved for ' + plural(r.changed, 'pile') + '.', 'ok'); PS.multi.clear(); return refreshAfterSave(true);
+            closeModal(); toast('Work area saved for ' + plural(r.changed, 'section') + '.', 'ok'); PS.multi.clear(); return refreshAfterSave(true);
           }).catch(function (e) { closeModal(); toast(e.message, 'err', 8000); });
         });
-        openModal('Set work area', [h('p', { text: plural(list.length, 'pile') + ' of Block ' + PS.block + ' → ' + (id ? areaName(id) : 'no work area') + '. The change is kept in each pile\'s layout record.' }),
+        openModal('Set work area', [h('p', { text: plural(list.length, 'section') + ' of Block ' + PS.block + ' → ' + (id ? areaName(id) : 'no work area') + '. The change is kept in each section\'s pile record.' }),
           h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Back', onclick: closeModal }))]);
       } }),
       PS.areas.filter(function (x) { return x.block === PS.block; }).length ? null : h('p', { class: 'small muted', text: 'Create work areas under Pile setup → Work areas first.' }));
   }
   function toolInspect(stack, sel) {
     ap(stack, h('p', { class: 'small', text: 'Current installation status:' }), currentSummary(sel),
-      h('button', { type: 'button', class: 'btn primary', id: 'pbtn-insp-form', text: 'Fill in the inspection for ' + plural(sel.length, 'pile'), onclick: function () {
-        if (sel.length > 1500) { toast('Record at most 1500 piles at a time.', 'err'); return; } inspectionForm(sel);
+      h('button', { type: 'button', class: 'btn primary', id: 'pbtn-insp-form', text: 'Fill in the inspection for ' + plural(sel.length, 'section'), onclick: function () {
+        if (sel.length > 1500) { toast('Record at most 1500 sections at a time.', 'err'); return; } inspectionForm(sel);
       } }));
   }
 
@@ -1168,13 +1144,13 @@
       if (s.category === 'rejected' && !F.p_corrective_action) { err.textContent = 'Describe the required corrective action.'; err.hidden = false; return; }
       var withCase = list.filter(function (p) { return openCases(p).length; });
       if ((s.category === 'accepted' || (ps && ps.category === 'accepted')) && withCase.length) {
-        err.textContent = plural(withCase.length, 'pile') + ' (' + withCase.slice(0, 8).map(function (p) { return p.code; }).join(', ') + ') ' + (withCase.length === 1 ? 'has' : 'have') + ' an open refusal or rectification case. Resolve or close it first.';
+        err.textContent = plural(withCase.length, 'section') + ' (' + withCase.slice(0, 8).map(function (p) { return p.code; }).join(', ') + ') ' + (withCase.length === 1 ? 'has' : 'have') + ' an open refusal or rectification case. Resolve or close it first.';
         err.hidden = false; return;
       }
       confirmInspection(list, s, ps, F);
     });
-    openModal('Inspection · ' + (list.length === 1 ? list[0].code : plural(list.length, 'pile')), [
-      list.length > 1 ? h('p', { class: 'small', text: 'The same result is recorded for each selected pile, each with its own record.' }) : null,
+    openModal('Inspection · ' + (list.length === 1 ? list[0].code : plural(list.length, 'section')), [
+      list.length > 1 ? h('p', { class: 'small', text: 'The same result is recorded for each selected section, each with its own record.' }) : null,
       h('div', { class: 'field' }, h('label', { for: 'pi-status', text: 'Inspection status' }), fSt),
       h('div', { class: 'grid-form' }, h('div', { class: 'field' }, h('label', { for: 'pi-date', text: 'Inspection date' }), fDate),
         h('div', { class: 'field' }, h('label', { for: 'pi-inspector', text: 'Inspector' }), fInsp)),
@@ -1196,7 +1172,7 @@
       btn.disabled = true; btn.textContent = 'Saving…';
       call('record_pile_inspection', Object.assign({ p_pile_ids: list.map(function (p) { return p.id; }) }, F)).then(function (r) {
         closeModal();
-        toast('Saved ' + plural(r.saved, 'inspection record') + (ps ? '; ' + plural(r.status_set, 'pile') + ' set to ' + ps.label : '') + '.', 'ok', 7000);
+        toast('Saved ' + plural(r.saved, 'inspection record') + (ps ? '; ' + plural(r.status_set, 'section') + ' set to ' + ps.label : '') + '.', 'ok', 7000);
         PS.multi.clear(); list.forEach(function (p) { PS.detail.delete(p.id); });
         return refreshAfterSave(false).then(function () { if (PS.sel) loadDetail(PS.sel, true); });
       }).catch(function (e) { closeModal(); toast(e.message, 'err', 12000); });
@@ -1204,7 +1180,7 @@
     openModal('Confirm inspection', [
       h('dl', { class: 'confirm-dl' },
         h('dt', { text: 'Inspection status' }), h('dd', null, iChip(s)),
-        h('dt', { text: 'Piles' }), h('dd', { text: String(list.length) }),
+        h('dt', { text: 'Sections' }), h('dd', { text: String(list.length) }),
         F.p_inspection_date ? h('dt', { text: 'Inspection date' }) : null, F.p_inspection_date ? h('dd', { text: fmtDate(F.p_inspection_date) }) : null,
         F.p_inspector ? h('dt', { text: 'Inspector' }) : null, F.p_inspector ? h('dd', { text: F.p_inspector }) : null,
         F.p_approval_date ? h('dt', { text: 'Approved' }) : null, F.p_approval_date ? h('dd', { text: fmtDate(F.p_approval_date) + (F.p_approved_by ? ' by ' + F.p_approved_by : '') }) : null,
@@ -1287,7 +1263,7 @@
     });
     openModal('Confirm ' + (c ? 'case update' : 'new case'), [
       h('dl', { class: 'confirm-dl' },
-        h('dt', { text: 'Pile' }), h('dd', { text: p.code + ' · ' + placeLabel(p) }),
+        h('dt', { text: 'Section' }), h('dd', { text: p.code + ' · ' + placeLabel(p) }),
         h('dt', { text: 'Type' }), h('dd', { text: CASE_KIND[F.p_kind] }),
         h('dt', { text: 'Encountered' }), h('dd', { text: fmtDate(F.p_date_encountered) }),
         h('dt', { text: 'Details' }), h('dd', { text: F.p_details }),
@@ -1372,7 +1348,7 @@
         cases.length ? h('div', { class: 'field' }, h('label', { for: 'pu-case', text: 'Case' }), fCase) : null),
       h('div', { class: 'field' }, h('label', { for: 'pu-remarks', text: 'Remarks' }), fRem),
       h('div', { class: 'field' }, h('label', { for: 'pu-corrective', text: 'Corrective action' }), fCor),
-      h('p', { class: 'small muted', text: 'Files are stored in the project database and shown only to signed-in users who may see this pile. Your name and the upload time are recorded.' }),
+      h('p', { class: 'small muted', text: 'Files are stored in the project database and shown only to signed-in users who may see this section. Your name and the upload time are recorded.' }),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
   function showFile(f) {
@@ -1388,7 +1364,7 @@
     }).catch(function (e) { toast(e.message, 'err'); });
   }
   function removeFile(p, f) {
-    var why = h('input', { id: 'prm-why', maxlength: 500, placeholder: 'e.g. wrong pile, duplicate' });
+    var why = h('input', { id: 'prm-why', maxlength: 500, placeholder: 'e.g. wrong section, duplicate' });
     var btn = h('button', { type: 'button', class: 'btn danger', id: 'prm-confirm', text: 'Remove the file' });
     btn.addEventListener('click', function () {
       if (!why.value.trim()) { toast('Give the reason.', 'err'); return; }
@@ -1413,14 +1389,13 @@
       save.disabled = true;
       call('admin_update_pile', { p_pile_id: p.id, p_work_area_id: fArea.value ? +fArea.value : null, p_table_code: fTable.value, p_pile_type: fType.value,
         p_design_length: fLen.value === '' ? null : +fLen.value, p_remarks: fRem.value, p_is_active: fAct.checked }).then(function () {
-        closeModal(); toast('Pile details saved; the change is in its layout record.', 'ok'); return refreshAfterSave(true).then(function () { loadDetail(p.id, true); });
+        closeModal(); toast('Section details saved; the change is in its pile record.', 'ok'); return refreshAfterSave(true).then(function () { loadDetail(p.id, true); });
       }).catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
-    openModal('Edit pile ' + p.code, [h('p', { class: 'small muted', text: 'Pile ID, block and position come from the import. To correct them, import the corrected rows with "Add new and update existing".' }),
-      h('div', { class: 'grid-form' }, h('div', { class: 'field' }, h('label', { for: 'pe-area', text: 'Work area' }), fArea), h('div', { class: 'field' }, h('label', { for: 'pe-table', text: 'Table ID' }), fTable)),
-      h('div', { class: 'grid-form' }, h('div', { class: 'field' }, h('label', { for: 'pe-type', text: 'Pile type' }), fType), h('div', { class: 'field' }, h('label', { for: 'pe-len', text: 'Design length (m)' }), fLen)),
+    openModal('Edit section ' + p.code, [h('p', { class: 'small muted', text: 'Section ID, block, table and position come from the keyplan and cannot be changed here.' }),
+      h('div', { class: 'field' }, h('label', { for: 'pe-area', text: 'Work area' }), fArea),
       h('div', { class: 'field' }, h('label', { for: 'pe-rem', text: 'Remarks' }), fRem),
-      h('label', { class: 'check' }, fAct, h('span', { text: 'Include this pile in monitoring and counts' })),
+      h('label', { class: 'check' }, fAct, h('span', { text: 'Include this section in pile monitoring and counts' })),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
 
@@ -1456,10 +1431,10 @@
           h('div', null, h('span', { class: 'tn-label', text: 'Achieved' }), h('span', { class: 'tn-num', text: pct1(acc, q) }))),
         h('div', { class: 'bar' }, bar),
         h('p', { class: 'small ptoday-extra', text: 'Target date ' + fmtDate(t.date) + '. Accepted today: ' + (t.accepted || 0) + '.' }),
-        compact ? null : h('p', { class: 'small', text: 'Current work status of your piles here (' + (sc.total || 0) + '): ' + Object.keys(CAT_LABEL).filter(function (k) { return sc[k]; }).map(function (k) { return CAT_LABEL[k] + ' ' + sc[k]; }).join(', ') + '.' }),
+        compact ? null : h('p', { class: 'small', text: 'Current work status of your sections here (' + (sc.total || 0) + '): ' + Object.keys(CAT_LABEL).filter(function (k) { return sc[k]; }).map(function (k) { return CAT_LABEL[k] + ' ' + sc[k]; }).join(', ') + '.' }),
         t.remarks ? h('p', { class: 'small today-remarks', text: 'Instructions: ' + t.remarks }) : null));
     });
-    if (!compact) ap(box, h('p', { class: 'small muted', text: 'Daily accomplished = piles first reported complete today (Philippine time), counted once per pile. Acceptance by the inspector is counted separately.' }));
+    if (!compact) ap(box, h('p', { class: 'small muted', text: 'Daily accomplished = sections first reported complete today (Philippine time), counted once per section. Acceptance by the inspector is counted separately.' }));
     return box;
   }
 
@@ -1482,7 +1457,7 @@
     function show() {
       items = searchMatches(inp.value); idx = items.length ? 0 : -1; list.textContent = '';
       if (!inp.value.trim()) { close(); return; }
-      if (!items.length) ap(list, h('li', { class: 'empty', text: PS.piles.length ? 'No pile with that ID' + (isSub() ? ' in your scope' : '') : 'No piles imported yet' }));
+      if (!items.length) ap(list, h('li', { class: 'empty', text: PS.piles.length ? 'No section with that ID' + (isSub() ? ' in your scope' : '') : 'No sections in your scope' }));
       items.forEach(function (p, i) {
         var li = h('li', { role: 'option', 'aria-selected': String(i === idx) }, h('span', { text: p.code }), h('span', { class: 'blk', text: 'B' + p.block + (p.table ? ' · ' + p.table : '') }));
         li.addEventListener('mousedown', function (e) { e.preventDefault(); choose(p); });
@@ -1517,12 +1492,12 @@
     openModal('How to use the pile keyplan', [
       h('ol', { class: 'steps' },
         h('li', { text: 'Choose Block 1 or Block 5, and what the colours show: installation status, contractors or inspection.' }),
-        h('li', { text: 'Use the filters for work area, contractor and status. Piles outside the filters are faded.' }),
-        h('li', { text: 'Find a pile: zoom in (pinch or scroll) and tap it, or type its ID in the search box. Tapping only selects it; nothing is saved.' }),
-        h('li', { text: 'Press Update status, choose the new status, add remarks, review and confirm. For many piles use Update several piles: tap piles, draw a box or Select all shown, then review and confirm.' }),
-        h('li', { text: 'A red ring marks a pile with an open refusal or rectification case. Hollow dots are out of scope.' })),
-      h('p', { class: 'small', text: 'Contractors can update only the piles assigned to their company and cannot set Accepted / Verified. Only the administrator or the authorised inspector records inspection and acceptance; a Completed pile stays Completed until then.' }),
-      h('p', { class: 'small', text: 'Every save records your username, the server time, the previous and new status and the contractor. Pile counts are separate from the Mounting Structure and PV Module table counts.' })]);
+        h('li', { text: 'Use the filters for work area, contractor and status. Sections outside the filters are faded.' }),
+        h('li', { text: 'Find a section: zoom in (pinch or scroll) and tap it, or type its ID in the search box. Tapping only selects it; nothing is saved.' }),
+        h('li', { text: 'Press Update status, choose the new status, add remarks, review and confirm. For many sections use Update several sections: tap sections, draw a box or Select all shown, then review and confirm.' }),
+        h('li', { text: 'A red ring marks a section with an open refusal or rectification case. White sections with a grey outline are out of scope.' })),
+      h('p', { class: 'small', text: 'Contractors can update only the sections assigned to their company and cannot set Accepted / Verified. Only the administrator or the authorised inspector records inspection and acceptance; a Completed section stays Completed until then.' }),
+      h('p', { class: 'small', text: 'Every save records your username, the server time, the previous and new status and the contractor. Section counts are separate from the Mounting Structure and PV Module table counts.' })]);
   }
 
   // ------------------------------------------------------------------

@@ -11,7 +11,7 @@
   function ap(el) { for (var i = 1; i < arguments.length; i++) X.append(el, arguments[i]); return el; }
 
   var D = { block: 'all', company: 'all', area: 'all', status: 'all', from: null, to: null, page: 0, q: '', tb: null, tbKey: '', rec: null, recKey: '', act: null, fmt: 'xlsx' };
-  var U = { tab: 'import', imp: null, imports: null, storage: null, tf: null, tl: { from: null, to: null }, tlData: null, tlKey: '' };
+  var U = { tab: 'areas', imp: null, imports: null, storage: null, tf: null, tl: { from: null, to: null }, tlData: null, tlKey: '' };
   Pi.resetPages = function () {
     D.tb = null; D.tbKey = ''; D.rec = null; D.recKey = ''; D.act = null; D.page = 0; D.company = 'all'; D.area = 'all';
     U.imp = null; U.imports = null; U.storage = null; U.tf = null; U.tlData = null; U.tlKey = '';
@@ -54,7 +54,7 @@
   function render() { if (PS.visible && PS.sub === 'dashboard') Pi.renderDashboard(); }
   Pi.renderDashboard = function (reset) {
     var root = $('#ppage'); if (!root) return;
-    if (!PS.loaded) { root.textContent = ''; ap(root, h('p', { class: 'small muted', text: 'Loading piles…' })); return; }
+    if (!PS.loaded) { root.textContent = ''; ap(root, h('p', { class: 'small muted', text: 'Loading sections…' })); return; }
     ensureDates(); loadBoard();
     if (!D.act && !X.isSub()) {
       D.act = 'loading';
@@ -65,10 +65,10 @@
   function build(root) {
     ap(root, h('div', { class: 'page-head' },
       h('div', null, h('h1', { text: 'Piles installation dashboard' }),
-        h('p', { text: 'Counts are piles, from the imported pile layout. They are kept separate from the Mounting Structure and PV Module table counts.' + (X.isSub() ? ' You see the piles assigned to your company.' : '') }))));
+        h('p', { text: 'Pile installation is recorded per table section (West / East half) of the keyplan, so counts are sections. They are kept separate from the Mounting Structure and PV Module counts.' + (X.isSub() ? ' You see the sections assigned to your company.' : '') }))));
     if (X.isSub()) { var big = I.todayTargetCard(false); if (big) ap(root, big); }
     if (!PS.piles.length) {
-      ap(root, h('div', { class: 'card empty-state' }, X.isAdmin() ? 'No pile layout has been imported yet. Import the pile list under Pile setup → Import.' : 'No piles to show yet.'));
+      ap(root, h('div', { class: 'card empty-state' }, X.isSub() ? 'No sections are assigned to your company for pile installation yet.' : 'No sections to show yet.'));
       return;
     }
     ap(root, filtersCard());
@@ -101,9 +101,9 @@
       sel('pd-block', 'Block', 'block', [['all', 'Both blocks'], ['1', 'Block 1'], ['5', 'Block 5']], function () { D.area = 'all'; }),
       X.isSub() ? null : sel('pd-co', 'Contractor', 'company', [['all', 'All contractors'], ['none', 'No contractor']].concat(Array.from(cos.keys()).sort(function (a, b) { return companyName(a).localeCompare(companyName(b)); }).map(function (c) { return [String(c), companyName(c)]; }))),
       sel('pd-area', 'Work area', 'area', [['all', 'All work areas'], ['none', 'No work area']].concat(areas.map(function (a) { return [String(a.id), (D.block === 'all' ? 'B' + a.block + ' · ' : '') + a.name]; }))),
-      sel('pd-status', 'Status (pile list)', 'status', stOpts),
+      sel('pd-status', 'Status (section list)', 'status', stOpts),
       dateIn('pd-from', 'From (targets and records)', 'from'), dateIn('pd-to', 'To', 'to')),
-      h('p', { class: 'hint filters-note', text: 'Block, contractor and work area filter every part of the page. The status filter narrows the pile list. The dates set the period for targets, accomplishment, inspections and cases.' }));
+      h('p', { class: 'hint filters-note', text: 'Block, contractor and work area filter every part of the page. The status filter narrows the section list. The dates set the period for targets, accomplishment, inspections and cases.' }));
   }
   function kpi(label, n, total, color, note, id) {
     var k = h('div', { class: 'kpi pkpi', id: id || null }, h('span', { class: 'k-label', text: label }),
@@ -112,9 +112,9 @@
     return k;
   }
   function kpis(c) {
-    var wrap = h('div', { class: 'card' }, h('h2', { text: 'Pile scope and status' }));
+    var wrap = h('div', { class: 'card' }, h('h2', { text: 'Section scope and status' }));
     var grid = h('div', { class: 'kpis' },
-      kpi('Total pile scope', c.total, null, '#15212c', c.off ? c.off + ' more out of scope (not counted)' : 'piles in the monitoring scope', 'pk-total'),
+      kpi('Total section scope', c.total, null, '#15212c', c.off ? c.off + ' more out of scope (not counted)' : 'sections in the monitoring scope', 'pk-total'),
       kpi('Reported complete', c.reported, c.total, '#6cc070', 'completed, for reinspection or accepted', 'pk-reported'),
       kpi('Accepted / verified', c.cat.accepted || 0, c.total, '#166534', 'accepted by the inspector', 'pk-accepted'),
       kpi('Remaining', c.remaining, c.total, '#c3cad2', 'not yet reported complete', 'pk-remaining'));
@@ -123,7 +123,7 @@
     }));
     var notAcc = c.total - (c.cat.accepted || 0);
     ap(wrap, grid, h('h3', { class: 'ph3', text: 'By status' }), grid2,
-      h('p', { class: 'small muted', text: 'Completed piles are not accepted until the inspector records it: ' + notAcc + ' piles are not yet accepted. ' + (c.cases ? plural(c.cases, 'pile') + (c.cases === 1 ? ' has' : ' have') + ' an open refusal or rectification case.' : 'No open refusal or rectification case.') }));
+      h('p', { class: 'small muted', text: 'Completed sections are not accepted until the inspector records it: ' + notAcc + ' sections are not yet accepted. ' + (c.cases ? plural(c.cases, 'section') + (c.cases === 1 ? ' has' : ' have') + ' an open refusal or rectification case.' : 'No open refusal or rectification case.') }));
     return wrap;
   }
   function bar(c) {
@@ -138,7 +138,7 @@
       if (D.block !== 'all' && String(b) !== D.block) return;
       var list = PS.piles.filter(function (p) { return p.block === b && dPass(p, false); }), c = counts(list);
       ap(prog, h('div', { class: 'prog-row' },
-        h('div', { class: 'p-label', text: 'Block ' + b + ' · ' + plural(c.total, 'pile') }), bar(c),
+        h('div', { class: 'p-label', text: 'Block ' + b + ' · ' + plural(c.total, 'section') }), bar(c),
         h('div', { class: 'p-nums' }, h('span', { text: 'Reported complete ' + c.reported + ' (' + X.fmtPct(c.reported, c.total) + ')' }),
           h('span', { text: 'Accepted ' + (c.cat.accepted || 0) + ' (' + X.fmtPct(c.cat.accepted || 0, c.total) + ')' }), h('span', { text: 'Remaining ' + c.remaining }))));
     });
@@ -159,7 +159,7 @@
     done.forEach(function (r) { day(r[3]).a += r[4]; });
     acc.forEach(function (r) { day(r[3]).v += r[4]; });
     var tq = 0, ta = 0, tv = 0; byDate.forEach(function (x) { tq += x.t; ta += x.a; tv += x.v; });
-    ap(card, h('p', { class: 'small', text: 'Period total: target ' + tq + ', accomplished ' + ta + ' (reported complete, counted once per pile), accepted ' + tv + '.' + (tq ? ' Achievement ' + pct1(ta, tq) + '.' : '') }));
+    ap(card, h('p', { class: 'small', text: 'Period total: target ' + tq + ', accomplished ' + ta + ' (reported complete, counted once per section), accepted ' + tv + '.' + (tq ? ' Achievement ' + pct1(ta, tq) + '.' : '') }));
     if (byDate.size) {
       var max = 1; byDate.forEach(function (x) { max = Math.max(max, x.t, x.a); });
       ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable pdays' },
@@ -185,13 +185,13 @@
     } else ap(card, h('p', { class: 'small muted', text: 'No pile targets in this period for these filters.' }));
     var extra = (tb.untargeted || []).filter(tPass);
     if (extra.length) ap(card, h('p', { class: 'small', text: 'Accomplished on days without a target: ' + extra.map(function (r) { return companyName(r.company_id) + ' B' + r.block + ' ' + fmtDate(r.date) + ': ' + r.accomplished; }).join(' · ') }));
-    ap(card, h('p', { class: 'small muted', text: 'Accomplished = piles first reported complete on that date (Philippine time), counted once per pile even if saved again. Accepted = piles first accepted by the inspector on that date.' }));
+    ap(card, h('p', { class: 'small muted', text: 'Accomplished = sections first reported complete on that date (Philippine time), counted once per section even if saved again. Accepted = sections first accepted by the inspector on that date.' }));
     return card;
   }
   function targetHistory(t) {
     call('get_pile_target_revisions', { p_target_id: t.id }).then(function (d) {
       openModal('Target history · ' + companyName(t.company_id), [
-        h('p', { class: 'small', text: 'Block ' + t.block + (t.work_area ? ' · ' + t.work_area : '') + ' · ' + fmtDate(t.date) + '. The dashboard uses the current quantity: ' + t.quantity + ' piles.' }),
+        h('p', { class: 'small', text: 'Block ' + t.block + (t.work_area ? ' · ' + t.work_area : '') + ' · ' + fmtDate(t.date) + '. The dashboard uses the current quantity: ' + t.quantity + ' sections.' }),
         h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
           h('thead', null, h('tr', null, ['When', 'Change', 'Quantity', 'Instructions', 'By'].map(function (x) { return h('th', { text: x }); }))),
           h('tbody', null, d.revisions.map(function (r) {
@@ -215,7 +215,7 @@
     }
     var keys = Array.from(rows.keys()).sort(function (a, b) { return a == null ? 1 : b == null ? -1 : companyName(a).localeCompare(companyName(b)); });
     ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable pco' },
-      h('thead', null, h('tr', null, ['Contractor', 'Piles', 'Reported complete', 'Accepted', 'Remaining', 'Open cases', 'Period target', 'Period accomplished', 'Achieved'].map(function (x, i) { return h('th', { class: i ? 'num' : null, text: x }); }))),
+      h('thead', null, h('tr', null, ['Contractor', 'Sections', 'Reported complete', 'Accepted', 'Remaining', 'Open cases', 'Period target', 'Period accomplished', 'Achieved'].map(function (x, i) { return h('th', { class: i ? 'num' : null, text: x }); }))),
       h('tbody', null, keys.map(function (k) {
         var r = rows.get(k), c = counts(r.list);
         return h('tr', null, h('td', null, k == null ? h('span', { class: 'pill', text: 'No contractor' }) : X.cchip(k)),
@@ -224,7 +224,7 @@
           h('td', { class: 'num', text: String(c.cases) }), h('td', { class: 'num', text: r.t ? String(r.t) : '—' }), h('td', { class: 'num', text: String(r.a) }),
           h('td', { class: 'num', text: r.t ? pct1(r.a, r.t) : '—' }));
       })))));
-    ap(card, h('p', { class: 'small muted', text: 'Piles and status are the current assignment. Period figures count the piles each contractor first reported complete in the chosen dates.' }));
+    ap(card, h('p', { class: 'small muted', text: 'Sections and status are the current assignment. Period figures count the sections each contractor first reported complete in the chosen dates.' }));
     return card;
   }
   function areaCard(base) {
@@ -236,7 +236,7 @@
       var A = PS.areaById.get(a), B = PS.areaById.get(b); return A.block - B.block || X.cmpCode(A.name, B.name);
     });
     ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-      h('thead', null, h('tr', null, ['Work area', 'Piles', 'Reported complete', 'Accepted', 'Remaining', 'Progress'].map(function (x, i) { return h('th', { class: i && i < 5 ? 'num' : null, text: x }); }))),
+      h('thead', null, h('tr', null, ['Work area', 'Sections', 'Reported complete', 'Accepted', 'Remaining', 'Progress'].map(function (x, i) { return h('th', { class: i && i < 5 ? 'num' : null, text: x }); }))),
       h('tbody', null, keys.map(function (k) {
         var l = by.get(k), c = counts(l), a = PS.areaById.get(k);
         return h('tr', null, h('td', { text: a ? 'B' + a.block + ' · ' + a.name : 'No work area' }), h('td', { class: 'num', text: String(c.total) }),
@@ -255,7 +255,7 @@
     var openC = cases.filter(function (c) { return c.resolution_status === 'open' || c.resolution_status === 'in_progress'; });
     ap(card, h('h3', { class: 'ph3', text: 'Open and recently changed cases (' + openC.length + ' open)' }));
     if (cases.length) ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable pcases' },
-      h('thead', null, h('tr', null, ['Pile', 'Type', 'Encountered', 'Details', 'Corrective action', 'Responsible', 'Status'].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['Section', 'Type', 'Encountered', 'Details', 'Corrective action', 'Responsible', 'Status'].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, cases.slice(0, 200).map(function (c) {
         var open = c.resolution_status === 'open' || c.resolution_status === 'in_progress';
         return h('tr', null, h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: c.pile_code, onclick: function () { I.openPile(c.pile_id); } }), h('div', { class: 'small muted', text: 'B' + c.block + (c.work_area ? ' · ' + c.work_area : '') })),
@@ -269,7 +269,7 @@
     ap(card, h('h3', { class: 'ph3', text: 'Inspection records in the period (' + ins.length + ')' }),
       ins.length ? h('p', { class: 'small', text: Array.from(byS.entries()).map(function (e) { return e[0] + ': ' + e[1]; }).join(' · ') }) : h('p', { class: 'small muted', text: 'No inspections recorded in this period.' }));
     if (ins.length) ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-      h('thead', null, h('tr', null, ['Recorded', 'Pile', 'Result', 'Inspection date', 'Inspector', 'Approved', 'Pile status set'].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['Recorded', 'Section', 'Result', 'Inspection date', 'Inspector', 'Approved', 'Pile status set'].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, ins.slice(0, 100).map(function (i) {
         var s = PS.istById.get(i.status_id);
         return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(i.created_at) }),
@@ -280,8 +280,8 @@
     return card;
   }
   function pileList() {
-    var card = h('div', { class: 'card' }, h('h2', { text: 'Pile list' }));
-    var q = h('input', { id: 'pd-q', type: 'search', placeholder: 'Find pile ID or table ID', value: D.q, autocomplete: 'off', 'aria-label': 'Find pile ID or table ID' });
+    var card = h('div', { class: 'card' }, h('h2', { text: 'Section list' }));
+    var q = h('input', { id: 'pd-q', type: 'search', placeholder: 'Find section ID or table ID', value: D.q, autocomplete: 'off', 'aria-label': 'Find section ID or table ID' });
     q.addEventListener('input', function () { D.q = q.value; D.page = 0; var pos = q.selectionStart; Pi.renderDashboard(); var nq = $('#pd-q'); if (nq) { nq.focus(); try { nq.setSelectionRange(pos, pos); } catch (e) { /* ignore */ } } });
     var n = String(D.q || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     var list = PS.piles.filter(function (p) {
@@ -290,9 +290,9 @@
       return String(p.code).toUpperCase().replace(/[^A-Z0-9]/g, '').indexOf(n) >= 0 || String(p.table || '').toUpperCase().replace(/[^A-Z0-9]/g, '').indexOf(n) >= 0;
     }).sort(function (a, b) { return a.block - b.block || X.cmpCode(a.code, b.code); });
     var per = 50, pages = Math.max(1, Math.ceil(list.length / per)); if (D.page >= pages) D.page = pages - 1;
-    ap(card, h('div', { class: 'tool-row' }, h('div', { class: 'search pd-search' }, q), h('span', { class: 'small', text: plural(list.length, 'pile') })));
+    ap(card, h('div', { class: 'tool-row' }, h('div', { class: 'search pd-search' }, q), h('span', { class: 'small', text: plural(list.length, 'section') })));
     ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable plist' },
-      h('thead', null, h('tr', null, ['Pile ID', 'Block', 'Work area', 'Table', 'Contractor', 'Status', 'Inspection', 'Case'].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['Section ID', 'Block', 'Work area', 'Table', 'Contractor', 'Status', 'Inspection', 'Case'].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, list.slice(D.page * per, D.page * per + per).map(function (p) {
         var cs = openCases(p);
         return h('tr', null, h('td', null, h('button', { type: 'button', class: 'link-btn tid', text: p.code, onclick: function () { I.openPile(p.id); } })),
@@ -310,7 +310,7 @@
     var card = h('div', { class: 'card' }, h('h2', { text: 'Recent pile activity' }));
     var KIND = { status: 'Status update', inspection: 'Inspection', 'case': 'Case', assign: 'Contractor assignment', import: 'Pile import' };
     ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-      h('thead', null, h('tr', null, ['When', 'By', 'What', 'Piles', 'Details'].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['When', 'By', 'What', 'Sections', 'Details'].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, D.act.slice(0, 40).map(function (e) {
         return h('tr', null, h('td', { class: 'nowrap', text: fmtTime(e.at) }), h('td', { text: e.username }),
           h('td', { text: (KIND[e.kind] || e.kind) + ': ' + e.label }), h('td', { class: 'num', text: String(e.n) + (e.unchanged ? ' (+' + e.unchanged + ' unchanged)' : '') }),
@@ -354,7 +354,7 @@
   function exportRegister() {
     return call('admin_pile_register', {}).then(function (d) {
       var col = {}; d.columns.forEach(function (c, i) { col[c] = i; });
-      var head = ['Pile ID', 'Block', 'Work area', 'Table', 'Drawing X', 'Drawing Y', 'Pile type', 'Design length (m)', 'In scope', 'Remarks', 'Contractor',
+      var head = ['Section ID', 'Block', 'Work area', 'Table', 'Drawing X', 'Drawing Y', 'Section type', 'Design length (m)', 'In scope', 'Remarks', 'Contractor',
         'Installation status', 'Status since', 'Status by', 'Status remarks', 'Latest inspection', 'Inspection date', 'Approval date', 'Open cases', 'Files',
         'First reported complete', 'First accepted'];
       var rows = d.rows.map(function (r) {
@@ -369,32 +369,32 @@
   function num(v) { return v == null || v === '' ? '' : +v; }
   function exportDaily() {
     return call('admin_pile_daily_report', { p_from: D.from, p_to: D.to }).then(function (d) {
-      save('pile-daily-accomplishment-' + D.from + '-to-' + D.to, ['Date', 'Contractor', 'Block', 'Work area', 'Target (piles)', 'Accomplished (first reported complete)', 'Accepted (first accepted)', 'Remaining target', 'Achieved %'],
+      save('pile-daily-accomplishment-' + D.from + '-to-' + D.to, ['Date', 'Contractor', 'Block', 'Work area', 'Target (sections)', 'Accomplished (first reported complete)', 'Accepted (first accepted)', 'Remaining target', 'Achieved %'],
         d.rows.map(function (r) { return [r.date, r.company, r.block, r.work_area || '(whole block / none)', r.target || '', r.completed, r.accepted, r.target ? Math.max(0, r.target - r.completed) : '', r.target ? Math.round(1000 * r.completed / r.target) / 10 : '']; }));
     });
   }
   function exportInspections() {
     return call('admin_pile_inspections', { p_from: D.from, p_to: D.to }).then(function (d) {
-      save('pile-inspections-' + D.from + '-to-' + D.to, ['Recorded', 'Pile ID', 'Block', 'Inspection status', 'Inspection date', 'Inspector', 'Comments', 'Issues', 'Corrective action', 'Approval date', 'Approved by', 'Reinspection date', 'Reinspection result', 'Pile status set', 'Recorded by'],
+      save('pile-inspections-' + D.from + '-to-' + D.to, ['Recorded', 'Section ID', 'Block', 'Inspection status', 'Inspection date', 'Inspector', 'Comments', 'Issues', 'Corrective action', 'Approval date', 'Approved by', 'Reinspection date', 'Reinspection result', 'Pile status set', 'Recorded by'],
         d.rows.map(function (r) { return [localTs(r.recorded), r.pile, r.block, r.status, r.inspection_date || '', r.inspector || '', r.comments || '', r.issues || '', r.corrective_action || '', r.approval_date || '', r.approved_by || '', r.reinspection_date || '', r.reinspection_result || '', r.pile_status_set || '', r.by]; }));
     });
   }
   function exportStatusLog() {
     return call('admin_pile_status_log', { p_from: D.from, p_to: D.to }).then(function (d) {
       var col = {}; d.columns.forEach(function (c, i) { col[c] = i; });
-      save('pile-status-changes-' + D.from + '-to-' + D.to, ['Saved at', 'Pile ID', 'Block', 'Work area', 'Previous status', 'New status', 'Contractor', 'Saved by', 'Remarks', 'Source', 'Batch'],
+      save('pile-status-changes-' + D.from + '-to-' + D.to, ['Saved at', 'Section ID', 'Block', 'Work area', 'Previous status', 'New status', 'Contractor', 'Saved by', 'Remarks', 'Source', 'Batch'],
         d.rows.map(function (r) { return [localTs(r[col.at]), r[col.pile], r[col.block], r[col.work_area] || '', r[col.previous] || '', r[col['new']], r[col.contractor] || '', r[col.by], r[col.remarks] || '', r[col.source], r[col.batch] || '']; }));
     });
   }
   function exportCases() {
     return call('admin_pile_cases', {}).then(function (d) {
-      save('pile-refusal-rectification-' + stampNow(), ['Case', 'Pile ID', 'Block', 'Work area', 'Type', 'Date encountered', 'Details', 'Remarks', 'Corrective action', 'Responsible party', 'Resolution status', 'Resolution date', 'Reinspection result', 'Opened by', 'Opened at', 'Last change', 'Changes'],
+      save('pile-refusal-rectification-' + stampNow(), ['Case', 'Section ID', 'Block', 'Work area', 'Type', 'Date encountered', 'Details', 'Remarks', 'Corrective action', 'Responsible party', 'Resolution status', 'Resolution date', 'Reinspection result', 'Opened by', 'Opened at', 'Last change', 'Changes'],
         d.rows.map(function (r) { return [r['case'], r.pile, r.block, r.work_area || '', I.CASE_KIND[r.kind], r.date_encountered, r.details, r.remarks || '', r.corrective_action || '', r.responsible_party || '', I.CASE_ST[r.resolution_status], r.resolution_date || '', r.reinspection_result || '', r.opened_by, localTs(r.opened_at), localTs(r.updated_at), r.changes]; }));
     });
   }
   function exportAssign() {
     return call('admin_pile_assignment_log', { p_from: D.from, p_to: D.to }).then(function (d) {
-      save('pile-assignment-changes-' + D.from + '-to-' + D.to, ['Changed at', 'Pile ID', 'Block', 'Previous contractor', 'New contractor', 'Changed by', 'Batch'],
+      save('pile-assignment-changes-' + D.from + '-to-' + D.to, ['Changed at', 'Section ID', 'Block', 'Previous contractor', 'New contractor', 'Changed by', 'Batch'],
         d.rows.map(function (r) { return [localTs(r.at), r.pile, r.block, r.previous || '', r['new'] || '', r.by, r.batch]; }));
     });
   }
@@ -405,7 +405,7 @@
       var l = groups.get(k); if (!l) groups.set(k, l = []); l.push(p);
     });
     var sts = PS.statuses;
-    var head = ['Block', 'Work area', 'Contractor', 'Piles in scope', 'Out of scope'].concat(sts.map(function (s) { return s.label; })).concat(['Reported complete', 'Accepted', 'Remaining', 'Reported %', 'Accepted %', 'Open cases']);
+    var head = ['Block', 'Work area', 'Contractor', 'Sections in scope', 'Out of scope'].concat(sts.map(function (s) { return s.label; })).concat(['Reported complete', 'Accepted', 'Remaining', 'Reported %', 'Accepted %', 'Open cases']);
     var rows = Array.from(groups.keys()).sort().map(function (k) {
       var l = groups.get(k), c = counts(l), p = l[0];
       return [p.block, areaName(p.area) || '', coOf(p) ? companyName(coOf(p)) : '', c.total, c.off].concat(sts.map(function (s) { return c.st.get(s.id) || 0; }))
@@ -559,14 +559,13 @@
     keepScroll(root, reset, function () {
       root.textContent = '';
       ap(root, h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Pile setup' }),
-        h('p', { text: 'Pile layout import, work areas, statuses, pile targets and storage. Only administrators see this page.' }))));
+        h('p', { text: 'Work areas, pile statuses, pile targets and storage. Only administrators see this page.' }))));
       ap(root, h('div', { class: 'subtabs', role: 'group', 'aria-label': 'Pile setup sections' },
-        [['import', 'Import piles'], ['areas', 'Work areas'], ['statuses', 'Statuses'], ['targets', 'Pile targets'], ['storage', 'Storage']].map(function (x) {
+        [['areas', 'Work areas'], ['statuses', 'Statuses'], ['targets', 'Pile targets'], ['storage', 'Storage']].map(function (x) {
           return h('button', { type: 'button', 'aria-pressed': String(U.tab === x[0]), 'data-ptab': x[0], text: x[1], onclick: function () { U.tab = x[0]; Pi.renderSetup(true); } });
         })));
       var body = h('div', { class: 'stack', id: 'psetup-body' }); ap(root, body);
-      if (U.tab === 'import') importTab(body);
-      else if (U.tab === 'areas') areasTab(body);
+      if (U.tab === 'areas') areasTab(body);
       else if (U.tab === 'statuses') statusesTab(body);
       else if (U.tab === 'targets') targetsTab(body);
       else storageTab(body);
@@ -576,31 +575,31 @@
 
   // ---- import
   var FIELDS = [
-    ['code', 'Pile ID', true, ['pileid', 'pileno', 'pilenumber', 'pilecode', 'pile', 'pilemark', 'pileref', 'piletag', 'id', 'pilename']],
+    ['code', 'Section ID', true, ['pileid', 'pileno', 'pilenumber', 'pilecode', 'section', 'pilemark', 'pileref', 'piletag', 'id', 'pilename']],
     ['block', 'Block', true, ['block', 'blk', 'blockno', 'blocknumber']],
     ['x', 'X (drawing)', true, ['x', 'xcoord', 'xcoordinate', 'coordx', 'xm', 'positionx', 'easting', 'e']],
     ['y', 'Y (drawing)', true, ['y', 'ycoord', 'ycoordinate', 'coordy', 'ym', 'positiony', 'northing', 'n']],
     ['work_area', 'Work area', false, ['workarea', 'area', 'zone', 'sector', 'subblock', 'subarea']],
     ['table_code', 'Table ID', false, ['tableid', 'table', 'tableno', 'tablecode', 'tablenumber', 'structure', 'tracker']],
-    ['pile_type', 'Pile type', false, ['piletype', 'type', 'profile', 'section']],
+    ['pile_type', 'Section type', false, ['piletype', 'type', 'profile', 'section']],
     ['design_length', 'Design length (m)', false, ['designlength', 'length', 'lengthm', 'designlengthm', 'pilelength', 'embedment']],
     ['remarks', 'Remarks', false, ['remarks', 'remark', 'notes', 'note', 'comments', 'comment']]];
   function normH(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
-  function templateRows() { return [['Pile ID', 'Block', 'X', 'Y', 'Work area', 'Table ID', 'Pile type', 'Design length (m)', 'Remarks']]; }
+  function templateRows() { return [['Section ID', 'Block', 'X', 'Y', 'Work area', 'Table ID', 'Section type', 'Design length (m)', 'Remarks']]; }
   function importTab(body) {
     var M = U.imp;
-    var card = h('div', { class: 'card' }, h('h2', { text: 'Import the pile layout' }),
-      h('p', { class: 'card-sub', text: 'The keyplan drawing has no pile data, so the actual pile list is imported from Excel (.xlsx) or CSV. Nothing is saved until the file passes the check and you confirm.' }),
+    var card = h('div', { class: 'card' }, h('h2', { text: 'Import the section layout' }),
+      h('p', { class: 'card-sub', text: 'The keyplan drawing has no section data, so the actual section list is imported from Excel (.xlsx) or CSV. Nothing is saved until the file passes the check and you confirm.' }),
       h('div', { class: 'pimp-help' },
-        h('p', null, h('strong', { text: 'Required columns: ' }), 'Pile ID (unique within its block) · Block (1 or 5) · X and Y in the same AutoCAD coordinates as BLOCK 1 AND BLOCK 5 – KEYPLAN.dwg, for example the pile centre points of the pile layout drawing.'),
-        h('p', null, h('strong', { text: 'Optional: ' }), 'Work area · Table ID (e.g. M01-R02-T10) · Pile type · Design length (m) · Remarks.'),
-        h('p', { class: 'small muted', text: 'Survey coordinates (easting/northing) from another system do not line up with the keyplan and are refused. One header row, one pile per row.' })),
+        h('p', null, h('strong', { text: 'Required columns: ' }), 'Section ID (unique within its block) · Block (1 or 5) · X and Y in the same AutoCAD coordinates as BLOCK 1 AND BLOCK 5 – KEYPLAN.dwg, for example the section centre points of the section layout drawing.'),
+        h('p', null, h('strong', { text: 'Optional: ' }), 'Work area · Table ID (e.g. M01-R02-T10) · Section type · Design length (m) · Remarks.'),
+        h('p', { class: 'small muted', text: 'Survey coordinates (easting/northing) from another system do not line up with the keyplan and are refused. One header row, one section per row.' })),
       h('div', { class: 'btn-row' },
-        h('button', { type: 'button', class: 'btn small', id: 'pimp-tpl-x', text: 'Blank template (.xlsx)', onclick: function () { downloadBlob('pile-import-template.xlsx', xlsxBlob('Piles', templateRows()[0], [])); } }),
+        h('button', { type: 'button', class: 'btn small', id: 'pimp-tpl-x', text: 'Blank template (.xlsx)', onclick: function () { downloadBlob('pile-import-template.xlsx', xlsxBlob('Sections', templateRows()[0], [])); } }),
         h('button', { type: 'button', class: 'btn small', id: 'pimp-tpl-c', text: 'Blank template (.csv)', onclick: function () { X.download('pile-import-template.csv', templateRows()); } })));
     var file = h('input', { id: 'pimp-file', type: 'file', accept: '.xlsx,.csv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv' });
     file.addEventListener('change', function () { var f = file.files && file.files[0]; if (f) readFile(f); });
-    ap(card, h('div', { class: 'field' }, h('label', { for: 'pimp-file', text: 'Pile list file' }), file));
+    ap(card, h('div', { class: 'field' }, h('label', { for: 'pimp-file', text: 'Section list file' }), file));
     if (M && M.error) ap(card, h('p', { class: 'form-error', text: M.error }));
     if (M && M.sheets) mappingUI(card, M);
     body.append(card);
@@ -659,8 +658,8 @@
     var mkA = h('input', { type: 'checkbox', id: 'pimp-areas', checked: M.areas });
     mkA.addEventListener('change', function () { M.areas = mkA.checked; M.check = null; rerender(); });
     ap(card, h('div', { class: 'field' }, h('span', { class: 'label', text: 'Mode' }),
-      h('label', { class: 'check' }, modeA, h('span', { text: 'Add new piles only (an existing pile ID is an error)' })),
-      h('label', { class: 'check' }, modeU, h('span', { text: 'Add new piles and update existing ones (same pile ID in the same block: position, area, table, type and length are replaced; status and history are kept)' }))),
+      h('label', { class: 'check' }, modeA, h('span', { text: 'Add new sections only (an existing section ID is an error)' })),
+      h('label', { class: 'check' }, modeU, h('span', { text: 'Add new sections and update existing ones (same section ID in the same block: position, area, table, type and length are replaced; status and history are kept)' }))),
       h('label', { class: 'check' }, mkA, h('span', { text: 'Create work areas named in the file that do not exist yet' })));
     var missing = FIELDS.filter(function (f) { return f[2] && !(f[0] === 'block' && M.blockFixed) && !(M.map[f[0]] >= 0); });
     var chk = h('button', { type: 'button', class: 'btn primary', id: 'pimp-check', text: M.checking ? 'Checking…' : 'Check the file', disabled: !!M.checking || !data.length || !!missing.length });
@@ -706,19 +705,19 @@
     var okRows = r.error_count === 0;
     ap(card, h('div', { class: 'notice ' + (okRows ? 'info' : 'err'), id: 'pimp-result' },
       h('strong', { text: okRows ? 'The file passed the check.' : plural(r.error_count, 'problem') + ' found. Nothing can be saved until they are fixed.' }),
-      plural(r.rows, 'row') + ': ' + r['new'] + ' new pile' + (r['new'] === 1 ? '' : 's') + (M.mode === 'upsert' ? ', ' + r.update + ' existing to update' : '') +
+      plural(r.rows, 'row') + ': ' + r['new'] + ' new section' + (r['new'] === 1 ? '' : 's') + (M.mode === 'upsert' ? ', ' + r.update + ' existing to update' : '') +
       (Object.keys(r.blocks || {}).length ? ' · ' + Object.keys(r.blocks).map(function (b) { return 'Block ' + b + ': ' + r.blocks[b]; }).join(', ') : '') +
       (r.areas_to_create.length ? ' · new work areas: ' + r.areas_to_create.map(function (a) { return 'B' + a.block + ' ' + a.name; }).join(', ') : '') + '.'));
     if (r.errors.length) ap(card, h('div', { class: 'table-wrap pimp-errors' }, h('table', { class: 'dtable small' },
-      h('thead', null, h('tr', null, ['Row', 'Pile ID', 'Problem'].map(function (x) { return h('th', { text: x }); }))),
+      h('thead', null, h('tr', null, ['Row', 'Section ID', 'Problem'].map(function (x) { return h('th', { text: x }); }))),
       h('tbody', null, r.errors.map(function (e) { return h('tr', null, h('td', { text: String(rowOf(e.row)) }), h('td', { text: e.code || '—' }), h('td', { text: e.msg })); })))),
       r.error_count > r.errors.length ? h('p', { class: 'small muted', text: 'Showing the first ' + r.errors.length + ' problems.' }) : null);
     if (r.warnings.length) ap(card, h('details', { class: 'hist-box' }, h('summary', { text: plural(r.warning_count, 'warning') + ' (saved anyway)' }),
       h('div', { class: 'table-wrap' }, h('table', { class: 'dtable small' }, h('tbody', null, r.warnings.map(function (e) { return h('tr', null, h('td', { text: 'Row ' + rowOf(e.row) }), h('td', { text: e.code || '' }), h('td', { text: e.msg })); }))))));
     if (!okRows) return;
-    ap(card, h('p', { class: 'small', text: 'Preview: the piles of the file (blue) on the keyplan tables. Check that they sit on the tables before importing.' }), previewCanvas(M));
+    ap(card, h('p', { class: 'small', text: 'Preview: the sections of the file (blue) on the keyplan tables. Check that they sit on the tables before importing.' }), previewCanvas(M));
     var n = r['new'] + (M.mode === 'upsert' ? r.update : 0);
-    var go = h('button', { type: 'button', class: 'btn primary', id: 'pimp-save', text: M.saving ? 'Saving…' : 'Import ' + plural(n, 'pile'), disabled: !!M.saving || !n });
+    var go = h('button', { type: 'button', class: 'btn primary', id: 'pimp-save', text: M.saving ? 'Saving…' : 'Import ' + plural(n, 'section'), disabled: !!M.saving || !n });
     go.addEventListener('click', function () { confirmImport(M); });
     ap(card, h('div', { class: 'btn-row' }, go));
   }
@@ -752,14 +751,14 @@
     var r = M.check, n = r['new'] + (M.mode === 'upsert' ? r.update : 0);
     var btn = h('button', { type: 'button', class: 'btn primary', id: 'pimp-confirm', text: 'Confirm and import' });
     btn.addEventListener('click', function () { btn.disabled = true; btn.textContent = 'Saving…'; doImport(M); });
-    openModal('Import ' + plural(n, 'pile') + '?', [
+    openModal('Import ' + plural(n, 'section') + '?', [
       h('dl', { class: 'confirm-dl' },
         h('dt', { text: 'File' }), h('dd', { text: M.name }),
-        h('dt', { text: 'New piles' }), h('dd', { text: String(r['new']) }),
-        M.mode === 'upsert' ? h('dt', { text: 'Updated piles' }) : null, M.mode === 'upsert' ? h('dd', { text: String(r.update) }) : null,
+        h('dt', { text: 'New sections' }), h('dd', { text: String(r['new']) }),
+        M.mode === 'upsert' ? h('dt', { text: 'Updated sections' }) : null, M.mode === 'upsert' ? h('dd', { text: String(r.update) }) : null,
         r.areas_to_create.length ? h('dt', { text: 'New work areas' }) : null, r.areas_to_create.length ? h('dd', { text: r.areas_to_create.map(function (a) { return 'B' + a.block + ' ' + a.name; }).join(', ') }) : null),
       h('p', { class: 'small muted', text: M.rows.length > 3000 ? 'Large files are saved in parts of 3000 rows; each part is saved completely or not at all.' : 'The import is saved completely or not at all.' }),
-      h('p', { class: 'small muted', text: 'A new import can be undone below as long as nothing has been recorded on its piles.' }),
+      h('p', { class: 'small muted', text: 'A new import can be undone below as long as nothing has been recorded on its sections.' }),
       h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
   function doImport(M) {
@@ -797,8 +796,8 @@
       }
       return card;
     }
-    if (!U.imports.length) { ap(card, h('p', { class: 'small muted', text: 'No imports yet. ' + plural(PS.piles.length, 'pile') + ' in the app.' })); return card; }
-    ap(card, h('p', { class: 'small', text: plural(PS.piles.length, 'pile') + ' in the app (Block 1: ' + (PS.byBlock[1] || []).length + ', Block 5: ' + (PS.byBlock[5] || []).length + ').' }),
+    if (!U.imports.length) { ap(card, h('p', { class: 'small muted', text: 'No imports yet. ' + plural(PS.piles.length, 'section') + ' in the app.' })); return card; }
+    ap(card, h('p', { class: 'small', text: plural(PS.piles.length, 'section') + ' in the app (Block 1: ' + (PS.byBlock[1] || []).length + ', Block 5: ' + (PS.byBlock[5] || []).length + ').' }),
       h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
         h('thead', null, h('tr', null, ['When', 'File', 'By', 'New', 'Updated', 'Still in the app', ''].map(function (x) { return h('th', { text: x }); }))),
         h('tbody', null, U.imports.map(function (i) {
@@ -810,27 +809,27 @@
     return card;
   }
   function undoImport(i) {
-    var btn = h('button', { type: 'button', class: 'btn danger', id: 'pimp-undo-confirm', text: 'Remove the piles of this import' });
+    var btn = h('button', { type: 'button', class: 'btn danger', id: 'pimp-undo-confirm', text: 'Remove the sections of this import' });
     btn.addEventListener('click', function () {
       btn.disabled = true;
       call('admin_undo_pile_import', { p_import_id: i.id }).then(function (r) {
-        closeModal(); toast('Removed ' + plural(r.removed, 'pile') + (r.kept ? '; ' + r.kept + ' kept because work is already recorded on them' : '') + '.', 'ok', 8000);
+        closeModal(); toast('Removed ' + plural(r.removed, 'section') + (r.kept ? '; ' + r.kept + ' kept because work is already recorded on them' : '') + '.', 'ok', 8000);
         U.imports = null; return I.loadPiles().then(rerender);
       }).catch(function (e) { closeModal(); toast(e.message, 'err'); });
     });
-    openModal('Undo import?', [h('p', { text: (i.file_name || 'This import') + ': the ' + plural(i.still_in_app, 'pile') + ' it added are removed, except piles that already have a status, contractor, inspection, case or file. Piles it updated keep their new values. The undo is recorded.' }),
+    openModal('Undo import?', [h('p', { text: (i.file_name || 'This import') + ': the ' + plural(i.still_in_app, 'section') + ' it added are removed, except sections that already have a status, contractor, inspection, case or file. Sections it updated keep their new values. The undo is recorded.' }),
       h('div', { class: 'btn-row' }, btn, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
   // ---- work areas
   function areasTab(body) {
     var card = h('div', { class: 'card' }, h('h2', { text: 'Work areas' }),
-      h('p', { class: 'card-sub', text: 'Work areas group the piles of a block for assignment, targets and reports. Piles get their area from the import or from Set work area on the pile keyplan.' }));
+      h('p', { class: 'card-sub', text: 'Work areas group the sections of a block for assignment, targets and reports. Set them with Set work area on the pile keyplan.' }));
     [1, 5].forEach(function (b) {
       var list = PS.areas.filter(function (a) { return a.block === b; });
       ap(card, h('h3', { class: 'ph3', text: 'Block ' + b }));
       if (!list.length) { ap(card, h('p', { class: 'small muted', text: 'No work areas yet.' })); return; }
       ap(card, h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
-        h('thead', null, h('tr', null, ['Work area', 'Piles', 'Status', ''].map(function (x) { return h('th', { text: x }); }))),
+        h('thead', null, h('tr', null, ['Work area', 'Sections', 'Status', ''].map(function (x) { return h('th', { text: x }); }))),
         h('tbody', null, list.map(function (a) {
           var n = PS.piles.filter(function (p) { return p.area === a.id; }).length;
           return h('tr', null, h('td', { text: a.name }), h('td', { class: 'num', text: String(n) }), h('td', null, h('span', { class: 'pill ' + (a.is_active ? 'on' : 'off'), text: a.is_active ? 'Active' : 'Inactive' })),
@@ -905,9 +904,9 @@
     openModal((s ? 'Edit ' : 'Add ') + (insp ? 'inspection status' : 'pile status'), [
       h('div', { class: 'grid-form' }, h('div', { class: 'field' }, h('label', { for: 'ps-label', text: 'Name' }), fL), h('div', { class: 'field' }, h('label', { for: 'ps-color', text: 'Colour' }), fC)),
       h('div', { class: 'field' }, h('label', { for: 'ps-cat', text: 'Meaning (how it is counted)' }), fK),
-      insp ? null : h('label', { class: 'check' }, fCS, h('span', { text: 'Contractors may set this status on their own piles' })),
+      insp ? null : h('label', { class: 'check' }, fCS, h('span', { text: 'Contractors may set this status on their own sections' })),
       h('div', { class: 'grid-form' }, h('div', { class: 'field' }, h('label', { for: 'ps-sort', text: 'Order in lists' }), fO)),
-      h('label', { class: 'check' }, fA, h('span', { text: 'Offered when updating (piles already having it keep it)' })),
+      h('label', { class: 'check' }, fA, h('span', { text: 'Offered when updating (sections already having it keep it)' })),
       s ? h('p', { class: 'small muted', text: 'Renaming does not change saved history: each record keeps the name it was saved with.' }) : null,
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
     sync();
@@ -917,7 +916,7 @@
   function targetsTab(body) {
     var F = U.tf = U.tf || { company: '', block: '1', area: '', qty: '', start: PS.siteDate, end: PS.siteDate, days: [1, 2, 3, 4, 5, 6], dates: [], remarks: '' };
     var form = h('div', { class: 'card' }, h('h2', { text: 'Set daily pile targets' }),
-      h('p', { class: 'card-sub', text: 'Per contractor, block and (optionally) work area. Only the dates in the list get a target, each with its own number of piles; not every calendar day is a working day.' }));
+      h('p', { class: 'card-sub', text: 'Per contractor, block and (optionally) work area. Only the dates in the list get a target, each with its own number of sections; not every calendar day is a working day.' }));
     function fsel(id, label, key, opts, onch) {
       return h('div', { class: 'field' }, h('label', { for: id, text: label }),
         h('select', { id: id, onchange: function (e) { F[key] = e.target.value; if (onch) onch(); rerender(); } },
@@ -938,13 +937,13 @@
       return h('label', { class: 'check' }, cb, h('span', { text: n }));
     }));
     ap(form, h('div', { class: 'grid-form' },
-      h('div', { class: 'field' }, h('label', { for: 'pt-qty', text: 'Piles per date' }), qty),
+      h('div', { class: 'field' }, h('label', { for: 'pt-qty', text: 'Sections per date' }), qty),
       h('div', { class: 'field' }, h('label', { for: 'pt-start', text: 'From' }), st),
       h('div', { class: 'field' }, h('label', { for: 'pt-end', text: 'To (same date for one day)' }), en)),
       h('div', { class: 'field' }, h('span', { class: 'label', text: 'Working days in that range' }), dayBox),
       h('div', { class: 'tool-row' }, h('button', { type: 'button', class: 'btn', id: 'pt-add', text: 'Add these dates to the list', onclick: function () {
         if (!F.start) { toast('Choose the first date.', 'err'); return; }
-        var q = parseInt(F.qty, 10); if (!(q >= 1)) { toast('Enter the number of piles per date first.', 'err'); return; }
+        var q = parseInt(F.qty, 10); if (!(q >= 1)) { toast('Enter the number of sections per date first.', 'err'); return; }
         var end = F.end && F.end >= F.start ? F.end : F.start, d = F.start, n = 0, guard = 0;
         while (d <= end && guard++ < 400) {
           var wd = new Date(d + 'T00:00:00Z').getUTCDay();
@@ -962,7 +961,7 @@
     if (F.dates.length) {
       ap(form, h('p', { class: 'small', text: plural(F.dates.length, 'target date') + '. Change any quantity or remove a date before saving:' }),
         h('div', { class: 'tf-dates' }, F.dates.map(function (x) {
-          var qi = h('input', { type: 'number', min: 1, max: 20000, value: x.quantity, 'aria-label': 'Piles on ' + x.date });
+          var qi = h('input', { type: 'number', min: 1, max: 20000, value: x.quantity, 'aria-label': 'Sections on ' + x.date });
           qi.addEventListener('input', function () { x.quantity = parseInt(qi.value, 10) || 0; });
           return h('div', { class: 'tf-date' }, h('span', { text: fmtDate(x.date) }), qi,
             h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Remove ' + x.date, text: '×', onclick: function () { F.dates = F.dates.filter(function (y) { return y !== x; }); rerender(); } }));
@@ -973,7 +972,7 @@
     var save = h('button', { type: 'button', class: 'btn primary', id: 'pt-save', text: F.dates.length ? 'Review ' + plural(F.dates.length, 'target') : 'Save targets', disabled: !F.dates.length });
     save.addEventListener('click', function () {
       if (!F.company) { toast('Choose the contractor.', 'err'); return; }
-      if (F.dates.some(function (x) { return !(x.quantity >= 1); })) { toast('Every date needs a quantity of at least 1 pile.', 'err'); return; }
+      if (F.dates.some(function (x) { return !(x.quantity >= 1); })) { toast('Every date needs a quantity of at least 1 section.', 'err'); return; }
       var total = F.dates.reduce(function (a, x) { return a + x.quantity; }, 0);
       var ok = h('button', { type: 'button', class: 'btn primary', id: 'pt-confirm', text: 'Confirm and save' });
       ok.addEventListener('click', function () {
@@ -987,7 +986,7 @@
         h('dt', { text: 'Contractor' }), h('dd', null, X.cchip(+F.company)),
         h('dt', { text: 'Block / area' }), h('dd', { text: 'Block ' + F.block + (F.area ? ' · ' + areaName(+F.area) : ' · whole block') }),
         h('dt', { text: 'Dates' }), h('dd', { text: F.dates.map(function (x) { return x.date + ': ' + x.quantity; }).join(', ') }),
-        h('dt', { text: 'Total' }), h('dd', { text: plural(total, 'pile') }),
+        h('dt', { text: 'Total' }), h('dd', { text: plural(total, 'section') }),
         F.remarks ? h('dt', { text: 'Instructions' }) : null, F.remarks ? h('dd', { text: F.remarks }) : null),
         h('p', { class: 'small muted', text: 'A date that already has a target for this contractor and area is revised; the original quantity and each change stay in its history.' }),
         h('div', { class: 'btn-row' }, ok, h('button', { type: 'button', class: 'btn', text: 'Back', onclick: closeModal }))]);
@@ -1044,11 +1043,11 @@
     });
     openModal('Revise pile target · ' + companyName(t.company_id), [
       h('p', { class: 'small', text: 'Block ' + t.block + (t.work_area ? ' · ' + t.work_area : '') + ' · ' + fmtDate(t.date) }),
-      h('div', { class: 'field' }, h('label', { for: 'ptr-q', text: 'Piles' }), q), h('div', { class: 'field' }, h('label', { for: 'ptr-r', text: 'Remarks or instructions' }), rm),
+      h('div', { class: 'field' }, h('label', { for: 'ptr-q', text: 'Sections' }), q), h('div', { class: 'field' }, h('label', { for: 'ptr-r', text: 'Remarks or instructions' }), rm),
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
   function removeTarget(t) {
-    openModal('Remove this pile target?', [h('p', { text: companyName(t.company_id) + ' · Block ' + t.block + (t.work_area ? ' · ' + t.work_area : '') + ' · ' + fmtDate(t.date) + ' · ' + t.quantity + ' piles. It stops counting on the dashboard; its history is kept.' }),
+    openModal('Remove this pile target?', [h('p', { text: companyName(t.company_id) + ' · Block ' + t.block + (t.work_area ? ' · ' + t.work_area : '') + ' · ' + fmtDate(t.date) + ' · ' + t.quantity + ' sections. It stops counting on the dashboard; its history is kept.' }),
       h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn primary', id: 'ptrm-confirm', text: 'Remove', onclick: function () {
         call('admin_remove_pile_target', { p_target_id: t.id }).then(function () { closeModal(); toast('Target removed.', 'ok'); U.tlData = null; U.tlKey = ''; D.tb = null; D.tbKey = ''; rerender(); })
           .catch(function (e) { toast(e.message, 'err'); });
@@ -1067,8 +1066,8 @@
     function mb(b) { return (b / 1048576).toFixed(1) + ' MB'; }
     var used = s.database_bytes / (s.limit_mb * 1048576);
     var b = h('div', { class: 'bar' }), sp = h('span', { class: used > 0.85 ? 'b-on_hold' : 'b-completed' }); sp.style.width = Math.min(100, 100 * used) + '%'; ap(b, sp);
-    ap(card, h('p', { text: plural(s.files, 'file') + ' (' + mb(s.file_bytes) + ') for ' + plural(s.piles, 'pile') + '. Whole database: ' + mb(s.database_bytes) + ' of the ' + s.limit_mb + ' MB upload limit.' }), b,
-      h('p', { class: 'small', text: 'Photos are reduced to about 1600 px (typically 150–400 KB) before upload; PDFs up to 2 MB. Files are kept inside the project database, so they are protected by the same sign-in and are visible only to users allowed to see the pile.' }),
+    ap(card, h('p', { text: plural(s.files, 'file') + ' (' + mb(s.file_bytes) + ') for ' + plural(s.piles, 'section') + '. Whole database: ' + mb(s.database_bytes) + ' of the ' + s.limit_mb + ' MB upload limit.' }), b,
+      h('p', { class: 'small', text: 'Photos are reduced to about 1600 px (typically 150–400 KB) before upload; PDFs up to 2 MB. Files are kept inside the project database, so they are protected by the same sign-in and are visible only to users allowed to see the section.' }),
       h('p', { class: 'small', text: 'The Supabase free plan allows a 500 MB database; at that size the project becomes read-only. The upload limit (400 MB by default) stops new photos before that, leaving room for the records. The Pro plan (US$25/month) has 8 GB; raise the limit only after upgrading.' }));
     var lim = h('input', { id: 'pst-limit', type: 'number', min: 50, max: 100000, value: s.limit_mb });
     var save = h('button', { type: 'button', class: 'btn', id: 'pst-limit-save', text: 'Save limit' });
