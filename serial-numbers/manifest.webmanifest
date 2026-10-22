@@ -1,0 +1,15 @@
+{
+  "name": "PV Module Serial Numbers",
+  "short_name": "PV Serials",
+  "description": "Register and track PV module serial numbers per table.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#13202b",
+  "theme_color": "#13202b",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}
