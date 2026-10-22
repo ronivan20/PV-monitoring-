@@ -297,8 +297,13 @@
       navigator.serviceWorker.register('sw.js').then(function (reg) { Y.reg = reg; }).catch(function () { /* not available */ });
     });
     navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (hadController) showUpdateBar();
+      var had = hadController;
       hadController = true;
+      if (!had) return;
+      // a newer version took over: offer a reload (unless this page already is that version)
+      askWorker({ type: 'status' }, 3000).then(function (w) {
+        if (!w || w.version !== SN.version) showUpdateBar();
+      });
     });
   }
   function showUpdateBar() {

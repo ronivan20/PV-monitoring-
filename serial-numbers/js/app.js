@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var SN = window.SN, u = SN.u, api = SN.api, el = u.el;
-  SN.version = '20261023065524';
+  SN.version = '20261023070906';
 
   var S = (SN.state = {
     me: null, settings: {}, users: new Map(), tables: new Map(), list: [], blocks: [],

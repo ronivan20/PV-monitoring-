@@ -7,7 +7,7 @@
      (Background Sync, Android/Chrome).
    Never caches or touches the Supabase requests (data and photos stay private and live). */
 /* global PVSN_SYNC */
-var V = '20261023065524';
+var V = '20261023070906';
 var SHELL = 'pvsn-shell-' + V;
 var OCR = 'pvsn-ocr-v1';
 var PRECACHE = ["index.html", "config.js", "css/app.css", "icon-192.png", "icon-512.png", "icon.svg", "js/api.js", "js/app.js", "js/capture.js", "js/keyplan.js", "js/ocr-worker.js", "js/store.js", "js/sync-core.js", "js/sync.js", "js/util.js", "js/views-admin.js", "js/views-capture.js", "js/views-dash.js", "js/views-keyplan.js", "js/xlsx.js", "manifest.webmanifest", "vendor/html5-qrcode.min.js"];
