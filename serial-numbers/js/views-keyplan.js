@@ -1,7 +1,7 @@
 /* PV Module Serial Numbers — keyplan view, table panel and the module sheet (register / review / correct) */
 (function () {
   'use strict';
-  var SN = window.SN, u = SN.u, el = u.el, api = SN.api, S = SN.state;
+  var SN = window.SN, u = SN.u, el = u.el, api = SN.api, S = SN.state, core0 = window.PVSN_SYNC;
   var V = (SN.views = SN.views || {});
   V.list = V.list || {};
   V.register = function (name, obj) { V.list[name] = obj; };
@@ -78,7 +78,10 @@
       },
       isMarked: function (t) { return K.selectMode && K.sel.has(t.id); },
       markColor: '#7b2cbf',
-      subLabel: function (t) { return SN.inScope(t) ? t.n_ok + ' / 28' : (u.STATE[SN.tableState(t)] || ''); },
+      subLabel: function (t) {
+        var q = K.queued.get(t.id), nq = q ? q.size : 0;
+        return SN.inScope(t) ? t.n_ok + ' / 28' + (nq ? ' (+' + nq + ')' : '') : (u.STATE[SN.tableState(t)] || '');
+      },
       blocks: function () { return S.blocks; },
       boxSelect: function () { return K.selectMode ? 'shift' : null; },
       onBoxSelect: function (list) {
@@ -159,7 +162,15 @@
     });
     if (selBtn) selBtn.addEventListener('click', function () { setSelectMode(!K.selectMode); });
     renderLegend();
+    bindEvents();
+  }
+
+  var eventsBound = false;
+  function bindEvents() {
+    if (eventsBound) return;
+    eventsBound = true;
     SN.bus.on('tables', function (changed) {
+      if (!K.built) return;
       if (changed.length > 50) K.kp.setTables(S.list); else K.kp.invalidate();
       renderLegend();
       if (K.table) {
@@ -170,15 +181,36 @@
         if (stale) loadDetail(K.table.id, true); else renderPanel();
       }
     });
-    SN.bus.on('settings', function () { renderPanel(); });
-    SN.bus.on('detail-stale', function (tid) { if (K.table && K.table.id === tid) loadDetail(tid, true); });
+    SN.bus.on('settings', function () { if (K.built) renderPanel(); });
+    SN.bus.on('detail-stale', function (tid) { if (K.built && K.table && K.table.id === tid) loadDetail(tid, true); });
     SN.bus.on('outbox-list', function (items) {
       K.queued = new Map();
       items.forEach(function (it) {
         if (!K.queued.has(it.table_id)) K.queued.set(it.table_id, new Map());
         K.queued.get(it.table_id).set(it.r + '-' + it.c, it);
       });
+      if (!K.built) return;
       renderPanel();
+      if (K.sheet && K.sheet.refresh) K.sheet.refresh();
+      K.kp.invalidate();
+    });
+    // the offline copy of the records changed (first download, or other people's registrations)
+    SN.bus.on('records', function (tids) {
+      if (K.built && K.table && tids.has(K.table.id) && (!K.detail || K.detail.local)) loadDetail(K.table.id, true);
+    });
+    // a registration saved on this phone reached the server
+    SN.bus.on('uploaded', function (m) {
+      var rec = m.res && m.res.record;
+      if (!K.built || !rec || !K.detail || K.detail.table[0] !== rec.table_id) return;
+      K.detail.records = K.detail.records.filter(function (x) { return !(x.r === rec.r && x.c === rec.c); }).concat([rec]);
+      renderPanel();
+      if (K.sheet && K.sheet.refresh) K.sheet.refresh();
+    });
+    SN.bus.on('online', function (on) {
+      if (!K.built) return;
+      if (on && K.table) loadDetail(K.table.id, true);
+      else renderPanel();
+      if (K.sheet && K.sheet.refresh) K.sheet.refresh();
     });
   }
 
@@ -334,25 +366,49 @@
     document.body.classList.remove('panel-open');
     if (K.kp) K.kp.select(null);
   }
+  // Module records of one table: from the server when there is a connection (with photos and
+  // activity), otherwise from the copy on this phone. The phone copy is shown first while the
+  // server answers, so the grid appears at once even with a weak signal.
   function loadDetail(id, force) {
     if (!force && K.loading && K.loadingId === id) return K.loading;
     K.loadingId = id;
-    K.loading = api.call('sn_table', { p_table_id: id }).then(function (d) {
-      K.loading = null;
-      K.detail = d;
-      SN.applyTables([d.table]);
-      if (K.table && K.table.id === id) { K.table = S.tables.get(id); renderPanel(); }
-      if (K.sheet && K.sheet.tableId === id && K.sheet.refresh) K.sheet.refresh();
-      return d;
-    }, function (e) {
-      K.loading = null;
-      if (e.code !== 'SESSION') u.toast(e.message, 'error');
-      throw e;
-    });
-    K.loading.catch(function () {});
-    return K.loading;
+    function useLocal() {
+      return SN.localDetail(id).then(function (d) {
+        if (d && (!K.detail || K.detail.table[0] !== id || K.detail.local)) { K.detail = d; afterDetail(id); }
+        return d;
+      });
+    }
+    var p;
+    if (S.online === false) p = useLocal();
+    else {
+      if (!K.detail || K.detail.table[0] !== id || K.detail.local) useLocal().catch(function () {});
+      p = api.call('sn_table', { p_table_id: id }, { timeout: 20000 }).then(function (d) {
+        K.detail = d;
+        SN.applyTables([d.table]);
+        SN.store.replaceTable(id, d.records);
+        afterDetail(id);
+        return d;
+      }, function (e) {
+        if (api.isOffline(e)) return useLocal();
+        if (e.code !== 'SESSION') u.toast(e.message, 'error');
+        throw e;
+      });
+    }
+    var mine = K.loading = p.then(function (d) { if (K.loading === mine) K.loading = null; return d; },
+      function (e) { if (K.loading === mine) K.loading = null; throw e; });
+    mine.catch(function () {});
+    return mine;
+  }
+  function afterDetail(id) {
+    if (K.table && K.table.id === id) { K.table = S.tables.get(id); renderPanel(); }
+    if (K.sheet && K.sheet.tableId === id && K.sheet.refresh) K.sheet.refresh();
   }
   SN.loadDetail = loadDetail;
+  function offline() { return S.online === false; }
+  function needsNet(btn) {
+    if (offline()) { btn.disabled = true; btn.title = 'Needs a connection'; }
+    return btn;
+  }
 
   function renderPanel() {
     var p = u.$('#table-panel');
@@ -376,6 +432,13 @@
       !t.in_scope ? el('span.chip.warn', 'Excluded from scope') : null,
       t.assigned_to ? el('span.chip', u.icon('user', 14), SN.userName(t.assigned_to)) : null);
     body.appendChild(chips);
+    if (d && d.local) {
+      var rs = SN.sync.rs.st, upto = rs && rs.at ? u.fmtDateTime(rs.at) : null;
+      body.appendChild(el('p.small.offline-note', u.icon('wifi', 14), el('span',
+        offline() ? 'No signal: records from the copy on this phone' : 'Records from the copy on this phone (waiting for the server)',
+        upto ? ' (updated ' + upto + ')' : '', '.',
+        rs && !rs.complete ? ' The copy is still downloading, so some positions may be missing.' : '')));
+    }
 
     var iss = SN.issues(t);
     if (iss.length || !t.label || !t.confirmed) {
@@ -392,6 +455,11 @@
       body.appendChild(el('div.stats',
         stat('Registered', t.n_reg + ' / 28'), stat('Valid', t.n_ok), stat('Needs review', t.n_review, t.n_review ? 'bad' : ''),
         stat('Remaining', remaining), stat('Complete', Math.round(t.n_ok / 28 * 100) + '%')));
+      if (queued.size) {
+        var nerr = 0; queued.forEach(function (q) { if (q.state === 'error') nerr++; });
+        body.appendChild(el('p.small.queued-note', u.icon('upload', 14), el('span',
+          queued.size + ' more saved on this phone' + (nerr ? ' (' + nerr + ' refused by the server — open it to see why)' : offline() ? ', will upload when the signal is back' : ', uploading') + '. Not yet counted above.')));
+      }
       body.appendChild(el('div.progress', { role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '28', 'aria-valuenow': String(t.n_ok), 'aria-label': 'Valid modules' },
         el('span', { style: { width: (t.n_ok / 28 * 100) + '%' } })));
       if (t.first_completed) {
@@ -425,6 +493,7 @@
     }
     if (SN.can.admin()) {
       var adm = el('div.admin-acts');
+      if (offline()) adm.appendChild(el('p.small.muted.fullrow', 'Changing table status needs a connection.'));
       if (!t.confirmed) adm.appendChild(abtn('Confirm this table', function () { adminSet(t, { confirmed: true }, 'Confirm table ' + t.label + '? It becomes a normal table (Not installed) that can be registered once installed.'); }, 'primary'));
       else {
         adm.appendChild(t.installed ? abtn('Mark not installed', function () { adminSet(t, { installed: false }); })
@@ -465,7 +534,7 @@
     if (!d) body.appendChild(el('p.small.muted.loading', 'Loading module records…'));
     scroll = body; scroll.scrollTop = keep;
   }
-  function abtn(label, fn, kind) { return el('button.btn.small' + (kind ? '.' + kind : ''), { type: 'button', on: { click: fn } }, label); }
+  function abtn(label, fn, kind) { return needsNet(el('button.btn.small' + (kind ? '.' + kind : ''), { type: 'button', on: { click: fn } }, label)); }
   function stat(label, value, kind) { return el('div.stat' + (kind ? '.' + kind : ''), el('b', String(value)), el('span', label)); }
   function numberingText(c) {
     var corner = { TL: 'top-left', TR: 'top-right', BL: 'bottom-left', BR: 'bottom-right' }[c.start || 'TL'];
@@ -488,9 +557,13 @@
       sn = rec.serial.slice(-5);
       icon = rec.status === 'verified' ? u.icon('check', 14) : rec.status === 'needs_review' ? u.icon('alert', 14) : null;
       aria = 'Position ' + pos + ', row ' + r + ' column ' + c + ', serial ' + rec.serial + ', ' + (rec.status === 'needs_review' ? 'needs review' : rec.status === 'verified' ? 'verified' : 'registered');
+      if (q) { cls += ' conflict'; icon = u.icon('alert', 14); aria += '. This phone also has a different registration for this position that was not uploaded'; }
     } else if (q) {
-      cls = q.state === 'error' ? 'review' : 'queued'; sn = q.state === 'error' ? 'error' : 'waiting'; icon = u.icon('upload', 14);
-      aria = 'Position ' + pos + ', saved on this phone, waiting to upload';
+      var err = q.state === 'error';
+      cls = err ? 'review' : 'queued';
+      sn = err ? 'refused' : (S.sending === q.uid ? 'sending' : offline() ? 'saved' : 'waiting');
+      icon = u.icon(err ? 'alert' : 'upload', 14);
+      aria = 'Position ' + pos + ', serial ' + q.data.serial + (err ? ', saved on this phone but refused by the server' : ', saved on this phone, waiting to upload');
     } else {
       aria = 'Position ' + pos + ', row ' + r + ' column ' + c + ', not registered';
     }
@@ -573,7 +646,9 @@
       var d = K.detail && K.detail.table[0] === tid ? K.detail : null;
       if (!d) return 'loading';
       var rec = recMap(d).get(r + '-' + c), q = (K.queued.get(tid) || new Map()).get(r + '-' + c);
-      return sheet.mode + '|' + (rec ? rec.id + ':' + rec.status + ':' + (rec.reviewed_at || '') : 'none') + '|' + (q ? q.state : '');
+      // the capture form is never redrawn for a change of connection (it would lose the scan in progress)
+      return sheet.mode + '|' + (rec ? rec.id + ':' + rec.status + ':' + (rec.reviewed_at || '') + ':' + (d.local ? 'L' : 'S') + ':' + (offline() ? 'off' : 'on') : 'none') +
+        '|' + (q ? q.uid + ':' + q.state + ':' + (offline() ? 'off' : 'on') : '');
     }
     sheet.refresh = function () { if (sheet.busy) return; if (sigOf() === sheet.sig) return; render(); };
     K.sheet = sheet;
@@ -591,7 +666,7 @@
       var rec = recMap(d).get(r + '-' + c);
       var q = (K.queued.get(tid) || new Map()).get(r + '-' + c);
       if (sheet.mode === 'correct' && rec) return SN.captureForm(sheet, tt, rec);
-      if (rec) return recordView(sheet, tt, rec);
+      if (rec) return recordView(sheet, tt, rec, q);
       if (q) return queuedView(sheet, tt, q);
       if (SN.can.register() && SN.inScope(tt)) return SN.captureForm(sheet, tt, null);
       var why = !SN.can.register() ? 'Your role can view records but not register serial numbers.'
@@ -599,7 +674,8 @@
         : !tt.installed ? 'This table is marked Not installed. The administrator marks tables installed before registration.'
         : !tt.label ? 'This table has no table ID yet. The administrator must enter it first.'
         : 'This table is excluded from serial-number registration.';
-      body.appendChild(el('div.empty-state', u.icon('barcode', 40), el('h3', 'Not registered'), el('p', why)));
+      body.appendChild(el('div.empty-state', u.icon('barcode', 40), el('h3', 'Not registered'), el('p', why),
+        offline() && SN.can.register() ? el('p.small.muted', 'This status comes from the copy on this phone (updated ' + (S.lastSync ? u.ago(S.lastSync) : 'earlier') + '). If the administrator changed it since, connect once to refresh.') : null));
     }
     sheet.render = render;
     if (!K.detail || K.detail.table[0] !== tid) loadDetail(tid).then(render, function () {});
@@ -607,28 +683,74 @@
   }
   SN.openModule = openModule;
 
+  // the photo saved with a registration that has not reached the server yet
+  function localPhoto(q, alt) {
+    var blob = q.photo || q.thumb;
+    if (!blob) return null;
+    var url = URL.createObjectURL(blob), img = el('img', { src: url, alt: alt || 'Label photo saved on this phone' });
+    img.addEventListener('load', function () { setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
+    return img;
+  }
+  function retryItem(q) {
+    q.state = 'waiting'; q.error = null; q.code = null;
+    return api.outbox.put(q).then(function () { return SN.sync.flush(); }).then(function (r) {
+      if (r && r.sent) u.toast('Uploaded.', 'ok');
+      else if (r && core0.STOP[r.stopped]) u.toast(r.message || 'No connection. It stays on this phone and uploads later.', 'warn');
+    });
+  }
+  function discardItem(q) {
+    return u.confirmBox('Discard ' + q.data.serial + '?', 'The serial number and photo saved on this phone for ' + q.label + ' position ' + q.pos +
+      ' will be deleted without uploading.', 'Discard', 'danger').then(function (ok) {
+      if (ok) return api.outbox.remove(q.uid).then(function () { SN.updateOutboxBadge(); return true; });
+      return false;
+    });
+  }
+  SN.retryItem = retryItem; SN.discardItem = discardItem; SN.itemExplain = function (q) { return itemExplain(q); };
+  function itemExplain(q) {
+    if (q.code === 'TAKEN') return 'Someone else registered this position before this phone could upload. Compare both with the label on the module: if the other record is right, discard this one; if this one is right, ask QA/QC to correct the other record, then upload again.';
+    if (q.code === 'TABLE') return 'The table was changed by the administrator (for example marked not installed or excluded). Ask the administrator, then upload again.';
+    if (q.code === 'ROLE') return 'Your role no longer allows registering. Ask the administrator.';
+    return 'Fix the cause, then upload again — or discard it.';
+  }
   function queuedView(sheet, t, q) {
-    var body = sheet.modal.body;
-    body.appendChild(el('div.notice.' + (q.state === 'error' ? 'bad' : 'warn'), u.icon('upload'), el('div',
-      el('strong', q.state === 'error' ? 'Saved on this phone, but the server refused it' : 'Saved on this phone, waiting to upload'),
-      el('p', q.state === 'error' ? q.error : 'It uploads automatically when the connection is back. Keep this phone signed in.'),
-      el('p.mono.big', q.data.serial))));
-    var row = el('div.row');
-    row.appendChild(el('button.btn.primary', { type: 'button', on: { click: function () {
-      q.state = 'waiting'; q.error = null;
-      api.outbox.put(q).then(function () { return api.outbox.flush(); }).then(function () { SN.updateOutboxBadge(); u.toast('Upload attempted.', 'ok'); sheet.render(); });
-    } } }, u.icon('refresh'), 'Try upload now'));
-    row.appendChild(el('button.btn.danger', { type: 'button', on: { click: function () {
-      u.confirmBox('Discard this registration?', 'The serial number and photo saved on this phone will be deleted.', 'Discard', 'danger').then(function (ok) {
-        if (ok) api.outbox.remove(q.uid).then(function () { SN.updateOutboxBadge(); sheet.render(); });
-      });
-    } } }, 'Discard'));
+    var body = sheet.modal.body, err = q.state === 'error';
+    var img = localPhoto(q);
+    body.appendChild(el('div.rec-head', el('div.photo-box', img || el('span.muted', 'No photo')), el('div.rec-main',
+      el('div.kicker', 'Serial number'),
+      el('div.serial-big.mono', q.data.serial),
+      el('div.chips.tight', el('span.rbadge.' + (err ? 'review' : 'queued'), err ? 'Refused by the server' : 'Saved on this phone')),
+      el('div.small.muted', 'Saved ' + u.fmtDateTime(q.data.captured_at || q.created) + ' by you'))));
+    body.appendChild(el('div.notice.' + (err ? 'bad' : 'warn'), u.icon(err ? 'alert' : 'upload'), el('div',
+      el('strong', err ? 'Not uploaded: the server refused it' : offline() ? 'Waiting for signal' : 'Uploading…'),
+      el('p', err ? q.error : offline() ? 'It uploads by itself when the connection is back. Keep this phone signed in; you can close the app.' : 'It uploads in the background.'),
+      err ? el('p.small', itemExplain(q)) : null,
+      !err && q.lastError ? el('p.small.muted', 'Last try: ' + q.lastError) : null)));
+    var row = el('div.row.wrap');
+    row.appendChild(needsNet(el('button.btn.primary', { type: 'button', on: { click: function () { retryItem(q).then(function () { sheet.render(); }); } } },
+      u.icon('refresh'), err ? 'Upload again' : 'Upload now')));
+    row.appendChild(el('button.btn.danger', { type: 'button', on: { click: function () { discardItem(q).then(function (ok) { if (ok) sheet.render(); }); } } }, u.icon('trash'), 'Discard'));
     body.appendChild(row);
+    body.appendChild(el('dl.kv',
+      el('dt', 'Barcode'), el('dd.mono', q.data.barcode || '—'),
+      el('dt', 'Entry'), el('dd', q.data.method === 'barcode' ? 'From barcode' : q.data.method === 'ocr' ? 'From OCR' : 'Typed manually'),
+      el('dt', 'Remarks'), el('dd', q.data.remarks || '—')));
   }
 
-  function recordView(sheet, t, rec) {
+  function recordView(sheet, t, rec, q) {
     var body = sheet.modal.body;
-    var photoBox = el('button.photo-box', { type: 'button', 'aria-label': 'Open the label photo' }, el('span.muted', rec.photo ? 'Loading photo…' : 'No photo'));
+    if (q) {
+      // this phone also holds a registration for this position that the server did not take
+      body.appendChild(el('div.notice.bad', u.icon('alert'), el('div',
+        el('strong', 'This phone also has ' + q.data.serial + ' saved for this position'),
+        el('p.small', q.state === 'error' ? q.error : 'It was saved on this phone while the position was empty here.'),
+        el('p.small', 'Check the label on the module. If the record below is right, discard the one on this phone. If the phone is right, QA/QC corrects the record below, then upload again.'),
+        el('div.row.wrap',
+          localPhoto(q) ? el('div.photo-box.small', localPhoto(q, 'Photo saved on this phone')) : null,
+          el('button.btn.small.danger', { type: 'button', on: { click: function () { discardItem(q).then(function (ok) { if (ok) sheet.render(); }); } } }, 'Discard the phone copy'),
+          needsNet(el('button.btn.small', { type: 'button', on: { click: function () { retryItem(q).then(function () { sheet.render(); }); } } }, 'Upload again'))))));
+    }
+    var photoBox = el('button.photo-box', { type: 'button', 'aria-label': 'Open the label photo' },
+      el('span.muted', rec.local ? (rec.has_photo ? 'Photo can be viewed with signal' : 'No photo') : rec.photo ? 'Loading photo…' : 'No photo'));
     if (rec.thumb || rec.photo) {
       api.photoUrl(rec.photo || rec.thumb).then(function (url) {
         u.clear(photoBox).appendChild(el('img', { src: url, alt: 'Label photo of ' + rec.serial }));
@@ -655,27 +777,31 @@
       el('dt', 'OCR text'), el('dd', rec.ocr ? el('span.mono', rec.ocr.replace(/\s+/g, ' ').slice(0, 120)) : '—', rec.ocr_conf !== null && rec.ocr_conf !== undefined ? ' · ' + Math.round(rec.ocr_conf) + '% confidence' : ''),
       el('dt', 'Registered by'), el('dd', SN.userName(rec.orig_by) + ' · ' + u.fmtDateTime(rec.orig_captured_at)),
       rec.replaces_id ? [el('dt', 'Last corrected by'), el('dd', SN.userName(rec.by) + ' · ' + u.fmtDateTime(rec.captured_at))] : null,
+      !rec.replaces_id && rec.captured_at && rec.orig_captured_at && u.toDate(rec.captured_at) - u.toDate(rec.orig_captured_at) > 120000
+        ? [el('dt', 'Uploaded'), el('dd', u.fmtDateTime(rec.captured_at) + ' (saved offline on the phone first)')] : null,
       rec.device_time ? [el('dt', 'Phone time'), el('dd', u.fmtDateTime(rec.device_time))] : null,
       rec.reviewed_at ? [el('dt', rec.status === 'verified' ? 'Verified by' : 'Reviewed by'), el('dd', SN.userName(rec.reviewed_by) + ' · ' + u.fmtDateTime(rec.reviewed_at) + (rec.review_note ? ' — ' + rec.review_note : ''))] : null,
       el('dt', 'Remarks'), el('dd', rec.remarks || '—'),
       el('dt', 'Module ID'), el('dd.mono', (t.label || 'NO-ID') + '-R' + rec.r + 'C' + rec.c),
-      el('dt', 'Photo'), el('dd', rec.photo ? (rec.photo_bytes ? Math.round(rec.photo_bytes / 1024) + ' KB · ' : '') + 'stored privately' : 'none'));
+      el('dt', 'Photo'), el('dd', rec.local ? (rec.has_photo ? 'stored privately (view it with signal)' : 'none')
+        : rec.photo ? (rec.photo_bytes ? Math.round(rec.photo_bytes / 1024) + ' KB · ' : '') + 'stored privately' : 'none'));
     body.appendChild(kv);
 
     var acts = el('div.row.wrap');
     if (SN.can.review()) {
       if (rec.status !== 'verified') {
-        acts.appendChild(el('button.btn.primary', { type: 'button', disabled: !!(rec.dups && rec.dups.length), title: rec.dups ? 'Resolve the duplicate first' : '',
-          on: { click: function () { review(sheet, rec, 'verify'); } } }, u.icon('check'), 'Verify'));
+        acts.appendChild(needsNet(el('button.btn.primary', { type: 'button', disabled: !!(rec.dups && rec.dups.length), title: rec.dups ? 'Resolve the duplicate first' : '',
+          on: { click: function () { review(sheet, rec, 'verify'); } } }, u.icon('check'), 'Verify')));
       }
-      acts.appendChild(el('button.btn', { type: 'button', on: { click: function () { review(sheet, rec, 'flag'); } } }, u.icon('alert'), 'Flag for review'));
-      acts.appendChild(el('button.btn', { type: 'button', on: { click: function () { sheet.mode = 'correct'; sheet.render(); } } }, u.icon('edit'), 'Correct'));
-      acts.appendChild(el('button.btn.danger', { type: 'button', on: { click: function () { voidRec(sheet, rec); } } }, u.icon('trash'), 'Remove registration'));
+      acts.appendChild(needsNet(el('button.btn', { type: 'button', on: { click: function () { review(sheet, rec, 'flag'); } } }, u.icon('alert'), 'Flag for review')));
+      acts.appendChild(needsNet(el('button.btn', { type: 'button', on: { click: function () { sheet.mode = 'correct'; sheet.render(); } } }, u.icon('edit'), 'Correct')));
+      acts.appendChild(needsNet(el('button.btn.danger', { type: 'button', on: { click: function () { voidRec(sheet, rec); } } }, u.icon('trash'), 'Remove registration')));
+      if (offline()) body.appendChild(el('p.small.muted', 'Reviewing, correcting and removing records need a connection.'));
     } else if (rec.status === 'needs_review') {
       body.appendChild(el('p.muted', 'QA/QC will review this record.'));
     }
     body.appendChild(acts);
-    var histBtn = el('button.btn.ghost', { type: 'button' }, u.icon('history'), 'Show history of this position');
+    var histBtn = needsNet(el('button.btn.ghost', { type: 'button' }, u.icon('history'), 'Show history of this position'));
     var hist = el('div.history');
     histBtn.addEventListener('click', function () {
       histBtn.disabled = true;

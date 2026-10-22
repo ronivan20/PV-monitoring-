@@ -15,5 +15,21 @@ dashboard, daily accomplishments and Excel/CSV exports.
   one-line fix to its Code 128 reader, noted at the top of the file) and Tesseract (tesseract.js-core
   5.1.1, Apache-2.0; English LSTM data from tessdata, Apache-2.0).
 
-Files: `index.html` (page), `css/app.css`, `js/*.js` (app), `sw.js` (offline app shell),
-`manifest.webmanifest` + icons (add to home screen), `config.js` (connection).
+## Works without signal
+
+- `sw.js` (service worker) keeps the app files on the phone, so the app opens without signal; a new
+  version installs in the background and is used from the next start. The OCR engine is kept too,
+  after it is downloaded once.
+- After sign-in the phone keeps a copy of the project (tables, users, settings) and of the current
+  module records (`js/store.js`, IndexedDB `pvsn-data`), updated incrementally (`sn_sync`). Keyplan,
+  4 × 7 grids and duplicate checks work from that copy when there is no connection.
+- Every registration is saved on the phone first (`js/sync-core.js`, IndexedDB `pvsn-outbox`: data,
+  label photo and thumbnail) and uploaded in the background as soon as the server answers — also by the
+  service worker with the app closed (Background Sync, Android/Chrome). Uploads are idempotent, so a
+  retry never creates a second record. A registration refused by the server (e.g. the position was
+  taken meanwhile) stays on the phone with the reason until someone decides.
+- Sign-out deletes the copy of the project from the phone; registrations still waiting to upload stay
+  until the same person signs in again.
+
+Files: `index.html` (page), `css/app.css`, `js/*.js` (app), `sw.js` (offline files and background
+uploads), `manifest.webmanifest` + icons (add to home screen), `config.js` (connection).

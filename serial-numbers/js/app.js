@@ -1,12 +1,12 @@
-/* PV Module Serial Numbers — app core: session, data, sync, layout shell, routing */
+/* PV Module Serial Numbers — app core: session, data, start-up (also without signal), layout shell, routing */
 (function () {
   'use strict';
   var SN = window.SN, u = SN.u, api = SN.api, el = u.el;
-  SN.version = '2026.10.22';
+  SN.version = '20261023065524';
 
   var S = (SN.state = {
     me: null, settings: {}, users: new Map(), tables: new Map(), list: [], blocks: [],
-    serverTime: null, view: 'keyplan', online: true, lastSync: 0, outbox: 0, booted: false
+    serverTime: null, view: 'keyplan', online: null, lastSync: 0, outbox: 0, booted: false
   });
 
   // ---------- permissions ----------
@@ -24,7 +24,7 @@
       id: a[0], label: a[1] || '', block: a[2], x: +a[3], y: +a[4], flags: a[5] || [], confirmed: !!a[6],
       installed: !!a[7], in_scope: !!a[8], assigned_to: a[9], n_reg: a[10] | 0, n_ok: a[11] | 0,
       n_review: a[12] | 0, n_verified: a[13] | 0, first_completed: a[14], completed: a[15],
-      source: a[16], handle: a[17], drawn_label: a[18] || '', flags_cleared: !!a[19], updated: a[20]
+      source: a[16], handle: a[17], drawn_label: a[18] || '', flags_cleared: !!a[19], updated: a[20], raw: a
     };
   }
   function tableState(t) {
@@ -65,6 +65,7 @@
     (rows || []).forEach(function (a) { S.users.set(a[0], { id: a[0], username: a[1], full_name: a[2], role: a[3], active: a[4] }); });
     SN.bus.emit('users');
   }
+  SN.applyUsers = applyUsers;
   SN.userName = function (id) {
     var x = S.users.get(id);
     return x ? (x.full_name || x.username) : (id ? 'User #' + id : '—');
@@ -106,27 +107,40 @@
   }
   SN.show = show;
 
+  // Starts from the copy saved on this device when there is one (instant, works without signal),
+  // then brings it up to date from the server in the background.
   function boot() {
     document.title = 'PV Module Serial Numbers';
     var sess = api.session();
     if (!sess || !sess.token) { showLogin(); return; }
     if (sess.user && sess.user.must_change) { showPassword(true); return; }
     show('boot');
-    api.call('sn_bootstrap', {}, { quietSession: true }).then(start, function (e) {
+    SN.store.loadSnapshot(sess.user && sess.user.id).then(function (snap) {
+      if (snap) start(snap, true);
+      else fetchBootstrap();
+    }, fetchBootstrap);
+  }
+  function fetchBootstrap() {
+    api.call('sn_bootstrap', {}, { quietSession: true, timeout: 40000 }).then(function (b) {
+      start(b, false);
+      SN.store.saveSnapshot(b);
+    }, function (e) {
       if (e.code === 'SESSION') { api.setSession(null); showLogin(e.message); }
       else if (e.code === 'MUST_CHANGE') { showPassword(true); }
       else if (e.code === 'NOT_SET_UP') { showSetup(); }
-      else if (e.code === 'NETWORK') { showBootError(e.message); }
-      else { showBootError(e.message); }
+      else if (api.isOffline(e)) {
+        showBootError('No connection yet',
+          'This phone has no saved copy of the project yet. Connect once (mobile data or Wi-Fi) and open the app; after that it also opens and works without signal.');
+      } else { showBootError('Cannot reach the server', e.message); }
     });
   }
-  function showBootError(msg) {
+  function showBootError(title, msg) {
     show('boot');
     var b = document.getElementById('boot');
     u.clear(b).appendChild(el('div.boot-card',
-      el('h1', 'Cannot reach the server'), el('p', msg),
+      el('h1', title), el('p', msg),
       el('div.row', el('button.btn.primary', { type: 'button', on: { click: function () { boot(); } } }, 'Try again'),
-        el('button.btn', { type: 'button', on: { click: function () { api.setSession(null); location.reload(); } } }, 'Sign out'))));
+        el('button.btn', { type: 'button', on: { click: function () { signOut(); } } }, 'Sign out'))));
   }
   function showSetup() {
     show('screen-setup');
@@ -148,7 +162,7 @@
       var btn = document.getElementById('login-btn');
       if (!user || !pass) { err.hidden = false; err.textContent = 'Enter your username and password.'; return; }
       btn.disabled = true; btn.textContent = 'Signing in…'; err.hidden = true;
-      api.rpc('sn_login', { p_username: user, p_password: pass, p_agent: navigator.userAgent.slice(0, 180) }).then(function (r) {
+      api.rpc('sn_login', { p_username: user, p_password: pass, p_agent: navigator.userAgent.slice(0, 180) }, { timeout: 30000 }).then(function (r) {
         btn.disabled = false; btn.textContent = 'Sign in';
         if (!r || !r.ok) { err.hidden = false; err.textContent = (r && r.error) || 'Sign-in failed.'; return; }
         document.getElementById('login-pass').value = '';
@@ -157,7 +171,10 @@
       }, function (e) {
         btn.disabled = false; btn.textContent = 'Sign in';
         if (e.code === 'NOT_SET_UP') { showSetup(); return; }
-        err.hidden = false; err.textContent = e.message;
+        err.hidden = false;
+        err.textContent = api.isOffline(e)
+          ? 'No connection. Signing in needs signal (mobile data or Wi-Fi). Once signed in, the app also works without signal.'
+          : e.message;
       });
     });
     u.$$('.pw-toggle').forEach(bindPwToggle);
@@ -185,7 +202,7 @@
     if (f.dataset.bound) return;
     f.dataset.bound = '1';
     document.getElementById('pw-cancel').addEventListener('click', function () { show('screen-app'); });
-    document.getElementById('pw-signout').addEventListener('click', function () { signOut(); });
+    document.getElementById('pw-signout').addEventListener('click', function () { confirmSignOut(); });
     f.addEventListener('submit', function (e) {
       e.preventDefault();
       var oldp = document.getElementById('pw-old').value, n1 = document.getElementById('pw-new').value, n2 = document.getElementById('pw-new2').value;
@@ -199,41 +216,54 @@
         f.reset();
         u.toast('Password changed.', 'ok');
         if (S.booted) show('screen-app'); else boot();
-      }, function (e2) { btn.disabled = false; err.hidden = false; err.textContent = e2.message; });
+      }, function (e2) {
+        btn.disabled = false; err.hidden = false;
+        err.textContent = api.isOffline(e2) ? 'No connection. Changing the password needs signal.' : e2.message;
+      });
     });
   }
   SN.showPassword = showPassword;
 
+  // Sign-out clears the copy of the project on this device. Registrations that are still waiting
+  // to upload stay on the device and upload after the same person signs in again.
   function signOut(message) {
     var tok = api.token();
-    stopSync();
+    if (SN.sync) SN.sync.stop();
     api.setSession(null);
     api.clearPhotoCache();
-    if (tok) api.rpc('sn_logout', { p_token: tok }).catch(function () {});
-    S.booted = false; S.tables = new Map(); S.list = [];
+    if (tok) api.rpc('sn_logout', { p_token: tok }, { timeout: 8000 }).catch(function () {});
+    SN.store.clearAll();
+    S.booted = false; S.tables = new Map(); S.list = []; S.me = null; S.online = null;
     if (SN.views && SN.views.reset) SN.views.reset();
     showLogin(message);
   }
   SN.signOut = signOut;
+  function confirmSignOut() {
+    var n = S.outbox || 0;
+    if (!n) return signOut();
+    u.confirmBox('Sign out with ' + n + ' registration' + (n === 1 ? '' : 's') + ' not uploaded?',
+      (n === 1 ? 'It stays' : 'They stay') + ' on this phone and upload' + (n === 1 ? 's' : '') + ' after you sign in again with this account (with signal). Do not clear the browser data of this phone until then.',
+      'Sign out').then(function (ok) { if (ok) signOut(); });
+  }
   SN.bus.on('session-ended', function (msg) { if (S.booted || api.token()) signOut(msg); });
   SN.bus.on('must-change', function () { showPassword(true); });
 
-  function start(b) {
+  function start(b, fromCache) {
     S.me = b.user;
     var s = api.session(); s.user = b.user; api.setSession(s);
     S.settings = b.settings || {};
     S.serverTime = b.server_time;
+    S.lastSync = fromCache ? (b.saved_at || 0) : Date.now();
+    S.online = fromCache ? null : true;
     applyUsers(b.users);
     S.tables = new Map(); S.list = [];
     applyTables(b.tables);
     S.booted = true;
-    S.lastSync = Date.now();
     buildShell();
     show('screen-app');
     SN.views.init();
     route();
-    startSync();
-    api.outbox.flush().then(updateOutboxBadge, updateOutboxBadge);
+    SN.sync.start(fromCache);
   }
 
   // ---------- shell ----------
@@ -268,12 +298,16 @@
         var m = u.$('#me-menu');
         if (!m.hidden && !m.contains(e.target) && !menuBtn.contains(e.target)) m.hidden = true;
       });
-      u.$('#menu-password').addEventListener('click', function () { u.$('#me-menu').hidden = true; showPassword(false); });
-      u.$('#menu-signout').addEventListener('click', function () { u.$('#me-menu').hidden = true; signOut(); });
+      u.$('#menu-password').addEventListener('click', function () {
+        u.$('#me-menu').hidden = true;
+        if (S.online === false) { u.toast('Changing the password needs a connection.', 'warn'); return; }
+        showPassword(false);
+      });
+      u.$('#menu-signout').addEventListener('click', function () { u.$('#me-menu').hidden = true; confirmSignOut(); });
       u.$('#menu-help').addEventListener('click', function () { u.$('#me-menu').hidden = true; SN.views.help(); });
       u.$('#sync-btn').addEventListener('click', function () { SN.views.syncPanel(); });
     }
-    updateSyncChip();
+    SN.sync.render();
   }
   function toggleMenu() { var m = u.$('#me-menu'); m.hidden = !m.hidden; }
 
@@ -296,75 +330,8 @@
   SN.go = function (hash) { if (location.hash === hash) route(); else location.hash = hash; };
   window.addEventListener('hashchange', function () { if (S.booted) route(); });
 
-  // ---------- sync ----------
-  var timer = null, polling = false;
-  function startSync() {
-    stopSync();
-    timer = setInterval(poll, (window.SN_CONFIG.pollSeconds || 15) * 1000);
-  }
-  function stopSync() { if (timer) clearInterval(timer); timer = null; }
-  function poll(force) {
-    if (!S.booted || polling || (!force && document.hidden)) return Promise.resolve();
-    polling = true;
-    return api.call('sn_changes', { p_since: S.serverTime }).then(function (r) {
-      polling = false;
-      S.serverTime = r.server_time; S.lastSync = Date.now(); setOnline(true);
-      if (r.user && (r.user.role !== S.me.role)) { u.toast('Your role was changed by the administrator. Reloading…'); setTimeout(function () { location.reload(); }, 1500); }
-      if (r.users) applyUsers(r.users);
-      if (r.settings) { S.settings = r.settings; SN.bus.emit('settings'); }
-      applyTables(r.tables);
-      updateSyncChip();
-    }, function (e) {
-      polling = false;
-      if (e.code === 'NETWORK') setOnline(false);
-      updateSyncChip();
-    });
-  }
-  SN.poll = poll;
-  function setOnline(v) {
-    if (S.online === v) return;
-    S.online = v; updateSyncChip();
-    if (v) api.outbox.flush().then(updateOutboxBadge, updateOutboxBadge);
-  }
-  window.addEventListener('online', function () { poll(true); api.outbox.flush().then(updateOutboxBadge, updateOutboxBadge); });
-  window.addEventListener('offline', function () { setOnline(false); });
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) { poll(true); api.outbox.flush().then(updateOutboxBadge, updateOutboxBadge); } });
-  setInterval(function () { if (S.booted && S.outbox && navigator.onLine) api.outbox.flush().then(updateOutboxBadge, updateOutboxBadge); }, 20000);
-
-  function updateOutboxBadge() {
-    return api.outbox.list().then(function (items) {
-      var mine = items.filter(function (i) { return S.me && i.user_id === S.me.id; });
-      S.outbox = mine.length; S.outboxErrors = mine.filter(function (i) { return i.state === 'error'; }).length;
-      updateSyncChip();
-      SN.bus.emit('outbox-list', mine);
-    });
-  }
-  SN.updateOutboxBadge = updateOutboxBadge;
-  SN.bus.on('outbox', function () { updateOutboxBadge(); });
-  SN.bus.on('registered', function (ev) {
-    if (ev && ev.res && ev.res.tables) applyTables(ev.res.tables);
-    SN.bus.emit('detail-stale', ev && ev.item && ev.item.table_id);
-  });
-  function updateSyncChip() {
-    var chip = u.$('#sync-btn');
-    if (!chip) return;
-    var txt = u.$('#sync-text');
-    chip.classList.remove('ok', 'warn', 'bad');
-    if (!S.online) { chip.classList.add('bad'); txt.textContent = 'Offline' + (S.outbox ? ' · ' + S.outbox + ' waiting' : ''); }
-    else if (S.outboxErrors) { chip.classList.add('bad'); txt.textContent = S.outboxErrors + ' not uploaded'; }
-    else if (S.outbox) { chip.classList.add('warn'); txt.textContent = S.outbox + ' uploading'; }
-    else { chip.classList.add('ok'); txt.textContent = 'Live'; }
-    chip.title = 'Last update from the server: ' + (S.lastSync ? u.ago(S.lastSync) : 'never');
-  }
-  setInterval(updateSyncChip, 30000);
-
-  // ---------- service worker (keeps the app shell available with weak signal) ----------
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    window.addEventListener('load', function () { navigator.serviceWorker.register('sw.js').catch(function () {}); });
-  }
-
   document.addEventListener('DOMContentLoaded', function () {
-    if (!window.SN_CONFIG || !window.SN_CONFIG.supabaseUrl) { showBootError('The app is missing its connection settings (config.js).'); return; }
+    if (!window.SN_CONFIG || !window.SN_CONFIG.supabaseUrl) { showBootError('Cannot start', 'The app is missing its connection settings (config.js).'); return; }
     boot();
   });
 })();

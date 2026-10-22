@@ -32,7 +32,14 @@
       el('div.page-head', el('div', el('h1', 'Review'), el('p.muted', SN.can.review() ? 'Check flagged records, verify registrations and resolve duplicates.' : 'Read-only view of records and activity.')), block),
       tabs, el('div#rv-body')));
     R.built = true;
-    SN.bus.on('tables', u.debounce(function () { if (S.view === 'review' && R.tab !== 'log') loadQueue(true); }, 2000));
+    if (R.bound) return;
+    R.bound = true;
+    SN.bus.on('tables', u.debounce(function () { if (R.built && S.view === 'review' && R.tab !== 'log' && S.online !== false) loadQueue(true); }, 2000));
+    SN.bus.on('online', function (on) { if (on && R.built && S.view === 'review') showTab(R.tab); });
+  }
+  function offlineBox(what) {
+    return el('div.empty-state', u.icon('wifi', 36), el('h3', 'No signal'),
+      el('p', what + ' needs a connection. It loads by itself when the signal is back.'));
   }
   function showTab(tab) {
     R.tab = TABS.some(function (t) { return t.id === tab; }) ? tab : 'review';
@@ -43,6 +50,7 @@
     var body = u.$('#rv-body');
     if (!quiet) u.clear(body).appendChild(el('p.muted', 'Loading…'));
     var my = ++R.seq;
+    if (S.online === false) { u.clear(body).appendChild(offlineBox('This list')); return; }
     api.call('sn_queue', { p_kind: R.tab, p_filter: { block: R.block || null }, p_limit: 200 }).then(function (r) {
       if (my !== R.seq) return;
       u.clear(body);
@@ -59,7 +67,10 @@
         list.appendChild(recCard(rec, grouped));
       });
       body.appendChild(list);
-    }, function (e) { if (e.code !== 'SESSION') u.clear(body).appendChild(el('p.warn-text', e.message)); });
+    }, function (e) {
+      if (my !== R.seq || e.code === 'SESSION') return;
+      u.clear(body).appendChild(api.isOffline(e) ? offlineBox('This list') : el('p.warn-text', e.message));
+    });
   }
   function setNavCount(n) {
     u.$$('.nav-count').forEach(function (b) { b.hidden = !n; b.textContent = n > 99 ? '99+' : String(n); });
@@ -115,7 +126,10 @@
       });
       u.$('#log-more').hidden = r.rows.length < 100;
       if (!ul.children.length) ul.appendChild(el('li.muted', 'No entries.'));
-    }, function (e) { u.toast(e.message, 'error'); });
+    }, function (e) {
+      if (api.isOffline(e)) { var ul = u.$('#log-list'); if (ul && !ul.children.length) ul.parentNode.replaceChild(offlineBox('The activity log'), ul); }
+      else u.toast(e.message, 'error');
+    });
   }
 
   SN.views.register('review', {
@@ -170,7 +184,7 @@
         el('dt', 'Field Encoder'), el('dd', 'Scans barcodes, takes label photos and registers serial numbers on installed tables. Sees assigned tables.'),
         el('dt', 'QA/QC Reviewer'), el('dd', 'Registers too, verifies records, flags problems, corrects or removes registrations with a reason.'),
         el('dt', 'Construction Manager'), el('dd', 'Views the keyplan, dashboard, daily reports, photos and activity log, and exports reports. Cannot change data.'))));
-    }, function (e) { u.clear(box).appendChild(el('p.warn-text', e.message)); });
+    }, function (e) { u.clear(box).appendChild(api.isOffline(e) ? offlineBox('User management') : el('p.warn-text', e.message)); });
   }
   function userDialog(x) {
     var isNew = !x;
@@ -366,7 +380,15 @@
         el('li', 'Tap the module position in the 4 × 7 grid (or "Register next empty position").'),
         el('li', 'Tap ', el('strong', 'Scan barcode'), ' and hold the phone 15–25 cm from the label. The barcode is read and a frame is kept as the label photo. Use ', el('strong', 'Take label photo'), ' for a sharper photo.'),
         el('li', 'Check the serial number against the label, tick the confirmation and save. The app moves to the next empty position.')),
-      el('p', 'No signal? Saving still works: the record stays on the phone (shown as waiting) and uploads automatically when the connection is back. Keep the app signed in.'),
+      el('h3', 'No signal'),
+      el('p', 'The app keeps a copy of the project on the phone, so it opens and works without signal: keyplan, table grids, scanning, photos and saving. ' +
+        'Registrations are saved on the phone first and upload by themselves when the signal is back (on Android even with the app closed). ' +
+        'Positions saved on the phone are shown in yellow until they upload.'),
+      el('ul',
+        el('li', 'Before going to an area without signal: open the app once with signal and check "Connection and uploads" (top right) shows everything ready.'),
+        el('li', 'Add the app to the home screen (browser menu › Add to Home screen) and stay signed in.'),
+        el('li', 'Do not clear the browser data or sign out while registrations are waiting to upload.'),
+        el('li', 'Reviews, corrections, exports and administration need a connection.')),
       el('h3', 'Keyplan colours'),
       el('ul.stlist',
         el('li', sw('not_installed'), el('span', 'Gray — Not installed: wait until the administrator marks it installed')),
@@ -378,39 +400,116 @@
       el('h3', 'Duplicates and corrections'),
       el('p', 'A serial number already registered elsewhere is never overwritten: both records are marked Needs review. QA/QC corrects or removes the wrong one; every change keeps the old record, photo and reason in the history.')) });
   };
+  // ---------- "Connection and uploads": readiness for no signal + registrations waiting on this phone ----------
+  var syncPanel = null;
+  function mb(n) { return n >= 1048576 ? (n / 1048576).toFixed(n >= 104857600 ? 0 : 1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  function check(state, title, detail, extra) {
+    var ic = state === 'ok' ? 'check' : state === 'busy' ? 'refresh' : state === 'bad' ? 'alert' : 'clock';
+    return el('li.ready-' + state, el('span.ready-ic', u.icon(ic, 16)), el('div', el('strong', title), detail ? el('div.small.muted', detail) : null, extra || null));
+  }
   SN.views.syncPanel = function () {
-    var body = el('div');
-    var m = u.openModal({ title: 'Connection and uploads', body: body });
-    function render(items) {
-      u.clear(body);
-      body.appendChild(el('dl.kv',
-        el('dt', 'Server'), el('dd', S.online ? 'Connected' : 'Not reachable'),
-        el('dt', 'Last update'), el('dd', S.lastSync ? u.ago(S.lastSync) : 'never'),
-        el('dt', 'Saved on this phone'), el('dd', items.length ? items.length + ' registration' + (items.length > 1 ? 's' : '') : 'none')));
-      if (items.length) {
-        var ul = el('ul.reclist');
-        items.forEach(function (it) {
-          ul.appendChild(el('li', el('div.rec',
-            el('span.rec-body', el('span.rec-top', el('strong.mono', it.label + ' · P' + it.pos), el('span.rbadge.' + (it.state === 'error' ? 'review' : 'queued'), it.state === 'error' ? 'Refused' : 'Waiting')),
-              el('span.mono', it.data.serial), it.error ? el('span.rec-issues', it.error) : null,
-              el('span.small.muted', 'Saved ' + u.fmtDateTime(it.created))),
-            el('button.btn.small.danger', { type: 'button', on: { click: function () {
-              u.confirmBox('Discard?', 'Delete ' + it.data.serial + ' (' + it.label + ' P' + it.pos + ') from this phone without uploading it?', 'Discard', 'danger').then(function (ok) {
-                if (ok) api.outbox.remove(it.uid).then(refresh);
-              });
-            } } }, 'Discard'))));
-        });
-        body.appendChild(ul);
-      }
-      body.appendChild(el('div.row', el('button.btn.primary', { type: 'button', on: { click: function () {
-        api.outbox.list().then(function (all) {
-          return Promise.all(all.filter(function (i) { return i.state === 'error'; }).map(function (i) { i.state = 'waiting'; i.error = null; return api.outbox.put(i); }));
-        }).then(function () { return api.outbox.flush(); }).then(refresh, refresh);
-        SN.poll(true);
-      } } }, u.icon('refresh'), 'Sync now')));
+    if (syncPanel) { syncPanel.refresh(); return syncPanel.modal; }
+    var body = el('div.syncp');
+    var m = u.openModal({ title: 'Connection and uploads', body: body, onClose: function () { syncPanel = null; } });
+    var seq = 0;
+    function refresh() {
+      var my = ++seq;
+      Promise.all([SN.sync.status(), api.outbox.list()]).then(function (a) {
+        if (my !== seq || !syncPanel) return;
+        render(a[0], a[1]);
+      });
     }
-    function refresh() { SN.updateOutboxBadge(); api.outbox.list().then(function (items) { render(items.filter(function (i) { return S.me && i.user_id === S.me.id; })); }); }
+    syncPanel = { modal: m, refresh: refresh };
+    function render(st, all) {
+      var items = all.filter(function (i) { return S.me && i.user_id === S.me.id; }), others = all.length - items.length;
+      u.clear(body);
+      // connection
+      var on = S.online !== false;
+      body.appendChild(el('div.conn-line.' + (S.online === false ? 'off' : S.online ? 'on' : 'wait'),
+        el('span.sync-dot'), el('div',
+          el('strong', S.online === false ? 'No signal' : S.online ? 'Connected' : 'Connecting…'),
+          el('div.small.muted', (S.lastSync ? 'Last update from the server ' + u.ago(S.lastSync) : 'No update from the server yet') +
+            (S.online === false && S.lastContact ? ' · last contact ' + u.fmtDateTime(S.lastContact) : '')))));
+
+      // readiness for working without signal
+      var ul = el('ul.ready');
+      if (!st.swSupported) ul.appendChild(check('bad', 'App files', 'This browser cannot keep the app for offline use. Use Chrome (Android) or Safari (iPhone).'));
+      else if (st.shellReady) ul.appendChild(check('ok', 'App saved on this phone', 'Opens without signal' + (st.worker && st.worker.version ? ' · version ' + st.worker.version : '')));
+      else if (st.controlled || st.worker) ul.appendChild(check('busy', 'Saving the app on this phone…', 'Keep the app open with signal for a moment.'));
+      else ul.appendChild(check('wait', 'App not saved on this phone yet', 'Reload the app once with signal; it saves itself.'));
+      ul.appendChild(check(S.lastSync ? 'ok' : 'wait', 'Keyplan and table status', S.lastSync ? 'Updated ' + u.fmtDateTime(S.lastSync) : 'Not downloaded yet'));
+      var rec = st.rec;
+      if (st.noRecordSync) ul.appendChild(check('bad', 'Module records on this phone', 'Not available: the administrator needs to run database update 2 in Supabase. Until then the grids need a connection.'));
+      else if (rec && rec.complete) ul.appendChild(check(st.recRunning ? 'busy' : 'ok', 'Module records on this phone', u.num(st.recCount) + ' current records · updated ' + u.fmtDateTime(rec.at)));
+      else if (rec && rec.count) ul.appendChild(check('busy', 'Downloading module records…', u.num(rec.count) + (rec.total ? ' of ' + u.num(rec.total) : '') + ' so far. Keep the app open with signal.'));
+      else ul.appendChild(check(st.recRunning ? 'busy' : 'wait', 'Module records on this phone', st.recError ? 'Last try: ' + st.recError : 'Download starts with signal.'));
+      if (SN.can.register()) {
+        var ocrBtn = !st.ocrReady && st.swSupported ? el('button.btn.small', { type: 'button', disabled: !on, on: { click: function () {
+          ocrBtn.disabled = true; ocrBtn.textContent = 'Downloading…';
+          SN.sync.warmOcr(true).then(function (r) { if (r && !r.ok) u.toast('OCR download failed: ' + r.error, 'error'); refresh(); });
+        } } }, 'Download now (about 6 MB)') : null;
+        ul.appendChild(check(st.ocrReady ? 'ok' : 'wait', 'Reading label text (OCR) without signal',
+          st.ocrReady ? 'On this phone' : 'Not on this phone yet. Barcode scanning works offline anyway.', ocrBtn));
+        ul.appendChild(check(st.bgSync ? 'ok' : 'wait', 'Uploading in the background',
+          st.bgSync ? 'Uploads continue when the signal is back, even with the app closed.' : 'This browser uploads only while the app is open: open the app when you have signal again.'));
+      }
+      if (SN.sync.standalone()) ul.appendChild(check('ok', 'Installed on this phone', 'Opens from the home screen like an app.'));
+      else if (SN.sync.canInstall()) {
+        var instBtn = el('button.btn.small.primary', { type: 'button', on: { click: function () { SN.sync.install().then(function () { refresh(); }); } } }, 'Install the app');
+        ul.appendChild(check('wait', 'Install on the home screen (recommended)', 'It then opens like an app, also without signal, and the phone keeps its data.', instBtn));
+      } else {
+        ul.appendChild(check('wait', 'Add to the home screen (recommended)', SN.sync.isIOS()
+          ? 'In Safari: Share button › "Add to Home Screen". Then open the app from that icon.'
+          : 'Browser menu (⋮) › "Add to Home screen" or "Install app". Then open the app from that icon.'));
+      }
+      if (st.usage) {
+        ul.appendChild(check(st.persisted ? 'ok' : 'wait', 'Storage on this phone', mb(st.usage) + ' used' +
+          (st.persisted ? ' · protected from automatic clean-up' : ' · installing the app on the home screen protects it from clean-up')));
+      }
+      body.appendChild(el('h3', 'Ready to work without signal'));
+      body.appendChild(ul);
+
+      // waiting registrations
+      body.appendChild(el('h3', 'Saved on this phone, not uploaded (' + items.length + ')'));
+      if (!items.length) body.appendChild(el('p.muted', 'Nothing waiting. Every registration from this phone has reached the server.'));
+      else {
+        var list = el('ul.reclist');
+        items.forEach(function (it) {
+          var err = it.state === 'error', th = el('span.thumb', u.icon('camera', 20));
+          if (it.thumb || it.photo) {
+            var url = URL.createObjectURL(it.thumb || it.photo), img = el('img', { src: url, alt: '' });
+            img.addEventListener('load', function () { setTimeout(function () { URL.revokeObjectURL(url); }, 1000); });
+            u.clear(th).appendChild(img);
+          }
+          var acts = el('span.rec-acts',
+            el('button.btn.small', { type: 'button', on: { click: function () { m.close(); SN.go('#/keyplan/t/' + it.table_id + '/m/' + it.r + '-' + it.c); } } }, 'Open'),
+            err ? el('button.btn.small', { type: 'button', disabled: !on, on: { click: function () { SN.retryItem(it).then(refresh); } } }, 'Upload again') : null,
+            el('button.btn.small.danger', { type: 'button', on: { click: function () { SN.discardItem(it).then(function () { refresh(); }); } } }, 'Discard'));
+          list.appendChild(el('li', el('div.rec', th, el('span.rec-body',
+            el('span.rec-top', el('strong.mono', it.label + ' · P' + it.pos), el('span.rbadge.' + (err ? 'review' : 'queued'), err ? 'Refused' : S.sending === it.uid ? 'Uploading' : 'Waiting')),
+            el('span.mono', it.data.serial),
+            err ? el('span.rec-issues', it.error) : it.lastError ? el('span.small.muted', 'Last try: ' + it.lastError) : null,
+            err ? el('span.small.muted', SN.itemExplain(it)) : null,
+            el('span.small.muted', 'Saved ' + u.fmtDateTime(it.data.captured_at || it.created)), acts))));
+        });
+        body.appendChild(list);
+      }
+      if (others) body.appendChild(el('p.small.muted', others + ' registration' + (others === 1 ? '' : 's') + ' saved by another account on this phone. They upload when that person signs in here again.'));
+      body.appendChild(el('div.row', el('button.btn.primary', { type: 'button', disabled: !on, on: { click: function () {
+        SN.sync.flush({ retryErrors: true }).then(refresh, refresh);
+        SN.poll(true); SN.sync.syncRecords();
+      } } }, u.icon('refresh'), 'Sync now'), on ? null : el('span.small.muted', 'Starts by itself when the signal is back.')));
+      body.appendChild(el('details.more', el('summary', 'Before going to an area without signal'), el('ol.small',
+        el('li', 'Open the app with signal and wait until the list above shows everything ready (green ticks).'),
+        el('li', 'Add the app to the home screen: browser menu › "Add to Home screen" (Android) or Share › "Add to Home Screen" (iPhone).'),
+        el('li', 'Stay signed in. Without signal the app opens from the phone; registrations are saved on the phone.'),
+        el('li', 'Back in signal, uploads start by themselves. Open the app if this list still shows waiting items.'),
+        el('li', 'Never clear the browser data while registrations are waiting.'))));
+    }
     refresh();
     return m;
   };
+  ['outbox-list', 'records-sync', 'online', 'uploaded', 'installable'].forEach(function (ev) {
+    SN.bus.on(ev, u.debounce(function () { if (syncPanel) syncPanel.refresh(); }, 250));
+  });
 })();

@@ -42,8 +42,11 @@
       el('div.card#dash-daily'),
       el('div.card#dash-defs')));
     renderFilters();
-    SN.bus.on('tables', u.debounce(function () { if (S.view === 'dashboard') { renderTiles(); loadDaily(); } }, 1500));
-    SN.bus.on('users', function () { if (S.view === 'dashboard') renderFilters(); });
+    if (D.bound) return;
+    D.bound = true;
+    SN.bus.on('tables', u.debounce(function () { if (D.built && S.view === 'dashboard') { renderTiles(); loadDaily(); } }, 1500));
+    SN.bus.on('users', function () { if (D.built && S.view === 'dashboard') renderFilters(); });
+    SN.bus.on('online', function () { if (D.built && S.view === 'dashboard') { renderTiles(); loadDaily(); } });
   }
 
   function renderFilters() {
@@ -84,7 +87,9 @@
 
   function renderTiles() {
     var s = summarize(D.filter.block);
-    u.$('#dash-sub').textContent = (D.filter.block ? 'Block ' + D.filter.block : 'All blocks') + ' · live figures from the saved module records';
+    u.$('#dash-sub').textContent = (D.filter.block ? 'Block ' + D.filter.block : 'All blocks') + ' · ' + (S.online === false
+      ? 'no signal: figures from the copy on this phone (updated ' + (S.lastSync ? u.ago(S.lastSync) : 'earlier') + ')'
+      : 'live figures from the saved module records');
     var k = u.clear(u.$('#dash-kpis'));
     k.appendChild(el('div.kpis',
       tile('Serial-number registration', u.pct(s.valid, s.expected), u.num(s.valid) + ' of ' + u.num(s.expected) + ' modules confirmed and valid', 'hero'),
@@ -147,15 +152,28 @@
     var F = D.filter;
     return { block: F.block || null, q: F.q || null, user_id: F.user_id ? parseInt(F.user_id, 10) : null, from: F.from || null, to: F.to || null };
   }
+  // Daily figures come from the server; the last answer for each filter is kept on the device
+  // and shown (with its time) when there is no signal.
   function loadDaily() {
     var box = u.$('#dash-daily');
     if (!D.days) { u.clear(box).appendChild(el('h2', 'Daily accomplishments')); box.appendChild(el('p.muted', 'Loading…')); }
     var my = (D.seq = (D.seq || 0) + 1);
-    api.call('sn_daily', { p_filter: filterArgs() }).then(function (r) {
+    var key = 'daily:' + JSON.stringify(filterArgs());
+    function fromCopy(e) {
+      return SN.store.get(key).catch(function () { return null; }).then(function (c) {
+        if (my !== D.seq) return;
+        if (c && c.days) { D.days = c.days; D.daysAt = c.at; renderDaily(); return; }
+        u.clear(box).appendChild(el('h2', 'Daily accomplishments'));
+        box.appendChild(el('p.muted', e && !api.isOffline(e) ? e.message : 'No signal. The daily figures appear here when there is a connection.'));
+      });
+    }
+    if (S.online === false) { fromCopy(null); return; }
+    api.call('sn_daily', { p_filter: filterArgs() }, { timeout: 20000 }).then(function (r) {
       if (my !== D.seq) return;
-      D.days = r.days || [];
+      D.days = r.days || []; D.daysAt = null;
       renderDaily();
-    }, function (e) { if (e.code !== 'SESSION') { u.clear(box).appendChild(el('h2', 'Daily accomplishments')); box.appendChild(el('p.warn-text', e.message)); } });
+      SN.store.set(key, { at: Date.now(), days: D.days }).catch(function () {});
+    }, function (e) { if (e.code !== 'SESSION') fromCopy(e); });
   }
   function fillDays(days) {
     if (!days.length) return [];
@@ -169,6 +187,7 @@
   function renderDaily() {
     var box = u.clear(u.$('#dash-daily'));
     box.appendChild(el('div.card-head', el('h2', 'Daily accomplishments'), el('span.muted.small', 'Philippine time · select a day for details')));
+    if (D.daysAt) box.appendChild(el('p.small.offline-note', u.icon('wifi', 14), el('span', 'No signal: figures saved on this phone at ' + u.fmtDateTime(D.daysAt) + '. Registrations saved offline are not included until they upload.')));
     var days = fillDays(D.days || []);
     if (!days.length) { box.appendChild(el('p.muted', 'No modules registered yet for this filter.')); return; }
     var shown = days.length > 45 && !D.filter.from ? days.slice(-45) : days;
@@ -248,6 +267,7 @@
   function openDay(date) {
     var body = el('div', el('p.muted', 'Loading…'));
     var m = u.openModal({ title: u.fmtDateLong(date), body: body, wide: true });
+    if (S.online === false) { u.clear(body).appendChild(el('p.muted', 'The list of tables for a day needs a connection. Open it again when there is signal.')); return; }
     api.call('sn_day', { p_date: date, p_filter: filterArgs() }).then(function (r) {
       u.clear(body);
       body.appendChild(el('div.kpis.two',
@@ -324,6 +344,7 @@
         el('p.small.muted', 'Photos stay in the private store; each record row has a link that opens it in the app (sign-in required).'), prog),
       actions: [{ label: 'Close' }, { label: 'Download', kind: 'primary', onClick: function (m, btn) {
         var kind = what.querySelector('input:checked').value, f = fmt.querySelector('input:checked').value;
+        if (S.online === false) { prog.textContent = 'Exports need a connection (they read the latest records from the server).'; return false; }
         btn.disabled = true;
         runExport(kind, f, block.value, function (msg) { prog.textContent = msg; }).then(function () {
           btn.disabled = false; prog.textContent = 'Done.';

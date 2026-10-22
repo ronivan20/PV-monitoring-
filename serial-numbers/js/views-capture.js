@@ -179,7 +179,11 @@
         var best = cands[0] || null;
         st.ocr = { text: (res.text || '').trim().slice(0, 600), conf: best && best.conf !== null ? best.conf : res.conf, best: best ? best.value : null };
         renderOcr();
-      }, function (e) { u.clear(ocrOut).appendChild(el('span.warn-text', 'OCR could not run: ' + e.message)); })
+      }, function (e) {
+        u.clear(ocrOut).appendChild(el('span.warn-text', S.online === false
+          ? 'OCR is not on this phone yet: it downloads once (about 6 MB) when there is signal. Use the barcode or type the serial number.'
+          : 'OCR could not run: ' + e.message));
+      })
         .then(function () { ocrBtn.disabled = false; });
     }
     function renderOcr() {
@@ -199,15 +203,29 @@
       }
       if (o.conf !== null && o.conf < (vset().ocr_min_confidence || 70)) ocrOut.appendChild(el('div.small.muted', 'Low OCR confidence — rely on the barcode or check the label by eye.'));
     }
+    // Duplicate check: the server when it answers, otherwise the copy of the records on this phone.
+    // Registrations saved on this phone but not uploaded yet are always checked too.
     var dupSeq = 0;
     var dupCheck = u.debounce(function () {
-      var v = serialIn.value.trim(), my = ++dupSeq;
-      if (!u.normSerial(v)) return;
-      api.call('sn_check_serial', { p_serial: v, p_table_id: t.id, p_r: r, p_c: c }).then(function (res) {
+      var v = serialIn.value.trim(), n = u.normSerial(v), my = ++dupSeq;
+      if (!n) return;
+      var server = S.online === false ? Promise.resolve(null)
+        : api.call('sn_check_serial', { p_serial: v, p_table_id: t.id, p_r: r, p_c: c }, { timeout: 8000 }).then(function (res) { return res.dups || []; }, function () { return null; });
+      Promise.all([server, SN.store.bySerial(n).catch(function () { return []; }), api.outbox.list()]).then(function (a) {
         if (my !== dupSeq) return;
-        st.dups = res.dups || [];
+        var same = function (tid, rr, cc) { return tid === t.id && rr === r && cc === c; };
+        var dups = a[0] !== null ? a[0].slice() : a[1].filter(function (x) { return !same(x.t, x.r, x.c); }).map(function (x) {
+          var tt = S.tables.get(x.t);
+          return { table_id: x.t, label: tt ? tt.label : '?', r: x.r, c: x.c };
+        });
+        a[2].forEach(function (it) {
+          if (u.normSerial(it.data && it.data.serial) !== n || same(it.table_id, it.r, it.c)) return;
+          if (dups.some(function (d) { return d.table_id === it.table_id && d.r === it.r && d.c === it.c; })) return;
+          dups.push({ table_id: it.table_id, label: it.label, r: it.r, c: it.c, queued: true });
+        });
+        st.dups = dups; st.dupSource = a[0] !== null ? 'server' : 'phone';
         renderSerialMsg();
-      }, function () { /* offline: the server checks again on save */ });
+      });
     }, 450);
     function renderSerialMsg() {
       u.clear(serialMsg);
@@ -222,10 +240,13 @@
       }
       if (st.dups && st.dups.length) {
         serialMsg.appendChild(el('div.bad-text', u.icon('alert', 14), ' Already registered at ',
-          st.dups.map(function (d, i) { return [i ? ', ' : '', el('strong', d.label + ' position ' + u.posNo(d.r, d.c, cfg()))]; }),
+          st.dups.map(function (d, i) { return [i ? ', ' : '', el('strong', d.label + ' position ' + u.posNo(d.r, d.c, cfg()) + (d.queued ? ' (saved on this phone)' : ''))]; }),
           '. Saving marks both records Needs review.'));
       } else if (st.dups) {
-        serialMsg.appendChild(el('div.ok-text', u.icon('check', 14), ' Not registered anywhere else.'));
+        var rs = SN.sync.rs.st;
+        serialMsg.appendChild(el('div.ok-text', u.icon('check', 14), st.dupSource === 'phone'
+          ? ' Not found in the copy on this phone' + (rs && rs.complete ? '' : ' (copy not complete yet)') + '. The server checks again when it uploads.'
+          : ' Not registered anywhere else.'));
       }
     }
     function checkSerial() { st.dups = null; renderSerialMsg(); dupCheck(); }
@@ -278,10 +299,13 @@
         ocr: st.ocr ? st.ocr.text : null, ocr_conf: st.ocr && st.ocr.conf !== null ? Math.round(st.ocr.conf * 10) / 10 : null,
         method: st.barcode ? 'barcode' : (st.ocrApplied ? 'ocr' : 'manual'),
         photo_bytes: st.photo ? st.photo.full.size : null, device_time: new Date().toISOString(),
+        // registration time on site, corrected for a wrong phone clock (the server keeps it within the last 30 days)
+        captured_at: new Date(SN.now()).toISOString(),
         remarks: remarks.value.trim(), unreadable: unread.checked, confirmed: true
       };
       var uid = u.uuid(), base = 't' + t.id + '/r' + r + 'c' + c + '/' + uid;
       if (correcting) {
+        if (S.online === false) { showErr('Corrections need a connection. Try again when there is signal.'); return; }
         setSaving(true, st.photo ? 'Uploading photo…' : 'Saving…');
         var p = Promise.resolve();
         if (st.photo) {
@@ -303,24 +327,27 @@
       var item = { uid: uid, user_id: S.me.id, table_id: t.id, r: r, c: c, label: t.label, pos: pos, data: data,
         photo: st.photo ? st.photo.full : null, thumb: st.photo ? st.photo.thumb : null,
         photoPath: base + '.jpg', thumbPath: base + '_t.jpg', created: Date.now(), state: 'waiting' };
-      setSaving(true, st.photo ? 'Uploading photo…' : 'Saving…');
-      api.sendRegistration(item).then(function (res) {
-        SN.applyTables(res.tables);
-        patchDetail(res.record);
-        saved(res.record.serial, res.record.status, false);
-      }, function (e) {
-        if (e.code === 'NETWORK') {
-          api.outbox.available().then(function (ok) {
-            if (!ok) { setSaving(false); showErr('No connection, and this browser cannot keep the record offline. Try again when the signal is back.'); return; }
-            api.outbox.add(item).then(function () {
-              SN.updateOutboxBadge();
-              saved(serial, 'queued', true);
-            });
+      setSaving(true, 'Saving…');
+      // Saved on this phone first (instant, works without signal), then uploaded in the background.
+      api.outbox.available().then(function (ok) {
+        if (ok) {
+          return api.outbox.add(item).then(function () {
+            SN.sync.queued(item);
+            saved(serial, S.online === false ? 'offline' : 'queued');
           });
-          return;
         }
+        // this browser cannot keep data on the device (e.g. some private windows): upload directly
+        setSaving(true, st.photo ? 'Uploading photo…' : 'Saving…');
+        return api.sendRegistration(item).then(function (res) {
+          SN.applyTables(res.tables);
+          patchDetail(res.record);
+          saved(res.record.serial, res.record.status);
+        });
+      }).catch(function (e) {
         setSaving(false);
-        showErr(e.message);
+        if (api.isOffline(e)) showErr('No connection, and this browser cannot keep registrations on the device (private window?). Open the app in a normal browser window, or try again with signal.');
+        else if (e && e.name === 'QuotaExceededError') showErr('The phone storage is full. Free some space (old photos, videos or apps), then save again.');
+        else showErr((e && e.message) || 'The registration could not be saved on this phone.');
         if (e.code === 'TAKEN' || e.code === 'TABLE') SN.loadDetail(t.id, true);
       });
     }
@@ -330,11 +357,11 @@
         K.detail.records = K.detail.records.filter(function (x) { return !(x.r === rec.r && x.c === rec.c); }).concat([rec]);
       }
     }
-    function saved(serial, statusCode, queued) {
+    function saved(serial, statusCode) {
       st.saving = false; sheet.busy = false;
-      var msg = queued ? 'Saved on this phone (no connection): position ' + pos + ' · ' + serial + '. It uploads automatically.'
+      var msg = statusCode === 'offline' ? 'Saved on this phone: position ' + pos + ' · ' + serial + ' (uploads when there is signal)'
         : 'Saved position ' + pos + ' · ' + serial + (statusCode === 'needs_review' ? ' — sent to QA/QC review' : '');
-      u.toast(msg, queued ? 'warn' : 'ok');
+      u.toast(msg, statusCode === 'offline' ? 'warn' : 'ok');
       var K = SN.K, recs = new Map();
       ((K.detail && K.detail.table[0] === t.id && K.detail.records) || []).forEach(function (x) { recs.set(x.r + '-' + x.c, x); });
       var q = K.queued.get(t.id) || new Map();

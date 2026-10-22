@@ -2,7 +2,8 @@
 // "publishable" key: it identifies the project but grants nothing by itself.
 // Every read and write is checked inside the database against a signed-in
 // app session, and label photos sit in a private bucket.
-window.SN_CONFIG = {
+// ("self" so the service worker can read it too.)
+self.SN_CONFIG = {
   supabaseUrl: 'https://hfxebicujwzcxekldygv.supabase.co',
   supabaseKey: 'sb_publishable_H11OwGDsFLqfslJMyUHsWA_lLjAuJqH',
   bucket: 'pvsn-photos',
