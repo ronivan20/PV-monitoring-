@@ -3,19 +3,24 @@
    data it downloaded, and updates saved without signal, in the phone's storage (offline.js).
    Requests to the database are never answered from here. */
 'use strict';
-var VERSION = '202610251310';
+var VERSION = '202610251430';
 // this worker looks after the files directly in the app's folder only; other apps in subfolders of
 // the same site (for example serial-numbers/) have their own worker and are left alone
 var BASE = new URL('./', self.location.href).pathname;
 var CACHE = 'pvm-shell-' + VERSION;
-var SHELL = ['./', 'styles.css?v=' + VERSION, 'config.js?v=' + VERSION, 'offline.js?v=' + VERSION, 'app.js?v=' + VERSION,
-  'piles.js?v=' + VERSION, 'piles-pages.js?v=' + VERSION, 'favicon.svg', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
-  'apple-touch-icon.png'];
+var SHELL = ['./', 'styles.css?v=' + VERSION, 'config.js?v=' + VERSION, 'offline.js?v=' + VERSION, 'install.js?v=' + VERSION,
+  'app.js?v=' + VERSION, 'piles.js?v=' + VERSION, 'piles-pages.js?v=' + VERSION, 'qrcode.js?v=' + VERSION, 'favicon.svg',
+  'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) {
     return c.addAll(SHELL.map(function (u) { return new Request(u, { cache: 'reload' }); }));
   }).then(function () { return self.skipWaiting(); }));
+});
+
+// the page asks which version this worker holds (to offer "Reload" when a newer one took over)
+self.addEventListener('message', function (e) {
+  if (e.data === 'pvm-version' && e.ports && e.ports[0]) e.ports[0].postMessage(VERSION);
 });
 
 self.addEventListener('activate', function (e) {

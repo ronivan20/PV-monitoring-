@@ -14,12 +14,14 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="PV Monitoring">
-<link rel="stylesheet" href="styles.css?v=202610251310">
-<script src="config.js?v=202610251310" defer></script>
-<script src="offline.js?v=202610251310" defer></script>
-<script src="app.js?v=202610251310" defer></script>
-<script src="piles.js?v=202610251310" defer></script>
-<script src="piles-pages.js?v=202610251310" defer></script>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="stylesheet" href="styles.css?v=202610251430">
+<script src="config.js?v=202610251430" defer></script>
+<script src="offline.js?v=202610251430" defer></script>
+<script src="install.js?v=202610251430" defer></script>
+<script src="app.js?v=202610251430" defer></script>
+<script src="piles.js?v=202610251430" defer></script>
+<script src="piles-pages.js?v=202610251430" defer></script>
 </head>
 <body>
 <div id="boot" class="boot"><span class="boot-dot"></span>Loading…</div>
@@ -47,6 +49,7 @@
     <button class="btn primary wide" type="submit" id="login-btn">Sign in</button>
     <p class="auth-fine">Accounts are created by the project administrator. There is no public sign-up.</p>
     <p class="auth-fine offline-note" id="login-offline" hidden></p>
+    <p class="auth-install"><button type="button" class="link-btn" id="login-install">Install the app on this phone, tablet or computer</button></p>
   </form>
 </main>
 
@@ -97,6 +100,7 @@
           <strong id="user-pop-name"></strong>
           <span id="user-pop-role"></span>
         </div>
+        <button type="button" class="menu-item" id="btn-install">Install the app on this device</button>
         <button type="button" class="menu-item" id="btn-help">How to use the keyplan</button>
         <button type="button" class="menu-item" id="btn-change-pw">Change my password</button>
         <button type="button" class="menu-item danger" id="btn-logout">Log out</button>
@@ -104,6 +108,8 @@
     </div>
   </header>
   <div class="netbar" id="netbar" role="status" aria-live="polite" hidden></div>
+  <div class="updatebar" id="updatebar" role="status" hidden></div>
+  <div class="installbar" id="installbar" hidden></div>
 
   <!-- Keyplan view -->
   <section id="view-keyplan" class="view view-keyplan">

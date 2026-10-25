@@ -278,6 +278,7 @@
   function showLogin(message) {
     stopPolling();
     showOnly('screen-login');
+    if (window.PVMInstall) window.PVMInstall.render();
     var err = $('#login-error');
     err.hidden = !message; err.textContent = message || '';
     setTimeout(function () { ($('#login-user').value ? $('#login-pass') : $('#login-user')).focus(); }, 30);
@@ -306,6 +307,7 @@
   }
   function showApp() {
     showOnly('screen-app');
+    if (window.PVMInstall) window.PVMInstall.render();
     setPage(S.page || 'keyplan', true);
     startPolling();
   }
@@ -3362,6 +3364,7 @@
       })),
       h('p', { class: 'small', text: 'Subcontractors can update only the sections and the activity assigned to their company: a Mounting Structure assignment does not allow PV Module updates, and the other way round. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
       h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' }),
+      h('p', { class: 'small', text: 'Install the app: tap your name at the top right, then Install the app on this device. It then opens from its own icon, full screen.' }),
       h('p', { class: 'small', text: 'No signal? Keep working. The keyplan shows what this phone saved last, and updates you save are kept on the phone (dashed blue outline, "Waiting to send") and sent automatically when the signal is back. If someone else changed the same section meanwhile, the app asks you whether to keep your update.' })]);
   }
   function openChangePassword() {

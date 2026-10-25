@@ -790,3 +790,18 @@ input[type="color"] { width: 52px; height: 38px; padding: 2px; }
   .netchip .nc-short { display: inline; }
 }
 .pend-line { color: #123d8f; font-weight: 600; }
+
+/* ---------- install the app ---------- */
+.installbar, .updatebar { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px max(12px, env(safe-area-inset-left)); font-size: 13px; line-height: 1.35; }
+.installbar { background: #e7f1fb; color: #123d8f; border-bottom: 1px solid #c4daf5; }
+.updatebar { background: #e5f4e4; color: #14532d; border-bottom: 1px solid #b9e0c4; }
+.installbar > span, .updatebar > span { flex: 1 1 220px; }
+.inst-steps { margin: 0; padding-left: 22px; display: grid; gap: 8px; font-size: 14px; line-height: 1.45; }
+.inst-ico { width: 18px; height: 18px; vertical-align: -4px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.inst-ico circle { fill: currentColor; stroke: none; }
+.inst-tabs { margin: 6px 0 10px; display: inline-flex; flex-wrap: wrap; }
+.qr-box { display: grid; place-items: center; padding: 6px; min-height: 120px; }
+.qr { width: 210px; height: 210px; border: 1px solid var(--line); border-radius: 6px; }
+.inst-link { font-family: var(--font-id); font-size: 13px; text-align: center; overflow-wrap: anywhere; margin: 4px 0; }
+.auth-install { margin: 10px 0 0; text-align: center; font-size: 14px; }
+.installbar .ib-btns { display: flex; gap: 6px; margin-left: auto; }
