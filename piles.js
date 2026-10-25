@@ -12,6 +12,13 @@
   var plural = X.plural, fmtTime = X.fmtTime, fmtDate = X.fmtDate, pct1 = X.pct1;
   // append that skips null / false children (like h())
   function ap(el) { for (var i = 1; i < arguments.length; i++) X.append(el, arguments[i]); return el; }
+  // updates saved on this phone and not sent yet (offline.js, update 10)
+  var OFF = window.PVMOffline || null;
+  var NOPEND = { pile: new Map(), pinsp: new Map(), pcase: new Map(), pfile: new Map() };
+  function pend() { return OFF ? OFF.pend : NOPEND; }
+  function submitSave(fn, args, meta) { return OFF && OFF.submit ? OFF.submit(fn, args, meta) : call(fn, args); }
+  function queuedNote(what) { return what + ' saved on this phone (no signal). It is sent automatically when the connection is back.'; }
+  function isPending(p) { var P = pend(); return P.pile.has(p.id) || P.pinsp.has(p.id) || P.pcase.has(p.id) || P.pfile.has(p.id); }
 
   var Pi = window.PVMPiles = window.PVMPiles || {};
   var POLL_MS = 20000;
@@ -122,6 +129,7 @@
       PS.since = d.server_time;
       var ch = applyChanges(d);
       if (ch.size) {
+        saveCopy();
         PK.stale = true; loadMyTarget();
         if (PS.sub === 'keyplan') {
           if (PS.sel && ch.has(PS.sel)) {
@@ -142,14 +150,49 @@
     if (!PS.visible || (document.hidden && !force)) return;
     pollNow();
   };
+  Pi.pollNow = function () { return PS.loaded ? pollNow() : Promise.resolve(); };
+  // the copy of the pile data kept on this phone follows what was merged (no extra download)
+  function saveCopy() {
+    if (!OFF) return;
+    var cur = [], ins = [], cases = [], files = [], since = PS.since;
+    PS.cur.forEach(function (v, k) { cur.push([k, v.uid, v.sid]); });
+    PS.insp.forEach(function (v, k) { ins.push([k, v.sid, v.date]); });
+    PS.cases.forEach(function (l, k) { l.forEach(function (c) { cases.push([k, c.id, c.kind, c.st]); }); });
+    PS.files.forEach(function (n, k) { files.push([k, n]); });
+    OFF.cachePatch('get_piles', {}, function (d) { d.current = cur; d.inspections = ins; d.open_cases = cases; d.file_counts = files; d.server_time = since; return d; });
+  }
+  // connects the outbox with the Piles screens
+  if (OFF) {
+    OFF.hooks.serverExpected = OFF.hooks.serverExpected || {};
+    OFF.hooks.serverExpected.submit_pile_updates = function (it) {
+      var e = {}; (it.args.p_pile_ids || []).forEach(function (id) { var c = PS.cur.get(id); e[id] = c ? c.uid : null; });
+      it.args.p_expected = e;
+    };
+    var pileSyncTimer = null, pileRaf = 0;
+    OFF.on('synced', function (it, res, first) {
+      if (first || !/^(submit_pile_updates|record_pile_inspection|save_pile_case|upload_pile_file)$/.test(it.fn)) return;
+      ((it.fx && it.fx.list) || []).map(function (x) { return x.id; }).concat(it.fx && it.fx.pile_id ? [it.fx.pile_id] : []).forEach(function (id) { PS.detail.delete(id); });
+      clearTimeout(pileSyncTimer);
+      pileSyncTimer = setTimeout(function () { if (PS.loaded) pollNow().then(function () { if (PS.sel && PS.visible) loadDetail(PS.sel, true); }); }, 600);
+    });
+    OFF.on('change', function () {
+      if (pileRaf || !PS.visible || !PS.loaded) return;
+      pileRaf = requestAnimationFrame(function () {
+        pileRaf = 0; PK.stale = true;
+        if (PS.sub === 'keyplan') { drawKP(); renderLegend(); renderFilters(); if (!PS.form && !PS.tool) renderPanel(); }
+        else if (PS.sub === 'dashboard' && Pi.renderDashboard) Pi.renderDashboard();
+      });
+    });
+  }
 
   // ------------------------------------------------------------------
   // Pile helpers
   // ------------------------------------------------------------------
-  function stOf(p) { var c = PS.cur.get(p.id); return (c && PS.stById.get(c.sid)) || PS.notStarted; }
+  function curP(p) { return pend().pile.get(p.id) || PS.cur.get(p.id) || null; }
+  function stOf(p) { var c = curP(p); return (c && PS.stById.get(c.sid)) || PS.notStarted; }
   function catOf(p) { return stOf(p).category; }
-  function inspOf(p) { var i = PS.insp.get(p.id); return i ? PS.istById.get(i.sid) || null : null; }
-  function openCases(p) { return PS.cases.get(p.id) || []; }
+  function inspOf(p) { var i = pend().pinsp.get(p.id) || PS.insp.get(p.id); return i ? PS.istById.get(i.sid) || null : null; }
+  function openCases(p) { var w = pend().pcase.get(p.id); return w ? (PS.cases.get(p.id) || []).concat(w) : (PS.cases.get(p.id) || []); }
   function coOf(p) { var c = PS.asg.get(p.id); return c == null ? null : c; }
   function areaName(id) { var a = PS.areaById.get(id); return a ? a.name : ''; }
   function pileLabel(p) { return p ? p.code : '—'; }
@@ -221,7 +264,7 @@
   function stChip(s) { return pchip(s.color, s.label); }
   function iChip(s) { return s ? pchip(s.color, s.label) : pchip(PS.notInspected.color, PS.notInspected.label); }
   function coChip(cid) { return cid ? X.cchip(cid) : h('span', { class: 'pill', text: 'No contractor' }); }
-  function caseChip(c) { return h('span', { class: 'pill ' + (c.st === 'open' || c.st === 'in_progress' ? 'off' : 'on'), text: CASE_KIND[c.kind] + ' · ' + CASE_ST[c.st] }); }
+  function caseChip(c) { return h('span', { class: 'pill ' + (c.pending ? 'pend-pill' : c.st === 'open' || c.st === 'in_progress' ? 'off' : 'on'), text: CASE_KIND[c.kind] + ' · ' + (c.pending ? 'waiting to send' : CASE_ST[c.st]) }); }
   function sw(color, extra) { return h('span', { class: 'sw psw' + (extra ? ' ' + extra : ''), color: color }); }
   function textColorOn(hex) {
     var n = parseInt(String(hex || '#999999').slice(1), 16), r = n >> 16 & 255, g = n >> 8 & 255, b = n & 255;
@@ -300,9 +343,12 @@
   Pi.render = render;
   function renderSync() {
     var el = $('#psync'); if (!el) return;
-    el.classList.toggle('ok', !PS.syncErr && !!PS.lastSync);
-    el.classList.toggle('err', !!PS.syncErr);
-    $('#psync-text').textContent = PS.syncErr ? 'Offline · retrying' : PS.lastSync ? 'Updated ' + PS.lastSync.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : 'Connecting…';
+    var off = !!PS.syncErr || (OFF && !OFF.online), n = OFF ? OFF.count() : 0;
+    el.classList.toggle('ok', !off && !!PS.lastSync && !n);
+    el.classList.toggle('err', off);
+    el.classList.toggle('wait', !off && !!n);
+    $('#psync-text').textContent = off ? (n ? 'Offline · ' + n + ' to send' : 'Offline · saved data') : n ? n + ' to send'
+      : PS.lastSync ? 'Updated ' + PS.lastSync.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : 'Connecting…';
   }
   function renderToolbar() {
     $$('#pseg-block button').forEach(function (b) { b.setAttribute('aria-pressed', String(+b.dataset.block === PS.block)); });
@@ -449,6 +495,11 @@
     // open refusal / rectification cases: red outline
     rects((PS.byBlock[PS.block] || []).filter(function (p) { return openCases(p).length; }), 1.6 * px);
     ctx.lineWidth = 2.4 * px; ctx.strokeStyle = '#c0262d'; ctx.stroke();
+    // saved on this phone, not sent yet: dashed blue outline
+    var pl = (PS.byBlock[PS.block] || []).filter(isPending);
+    if (pl.length) {
+      rects(pl, 1.4 * px); ctx.setLineDash([5 * px, 3 * px]); ctx.lineWidth = 2.2 * px; ctx.strokeStyle = '#1d5bd8'; ctx.stroke(); ctx.setLineDash([]);
+    }
     // selection
     if (PS.multi.size) {
       var ml = []; PS.multi.forEach(function (id) { var p = PS.byId.get(id); if (p && p.block === PS.block) ml.push(p); });
@@ -696,6 +747,8 @@
     var rows = h('div', { class: 'tb-rows' });
     L.rows.forEach(function (r) { ap(rows, h('div', null, sw(r.color)), h('div', { text: r.label }), h('div', { class: 'num', text: String(r.n) })); });
     if (cs) ap(rows, h('div', null, h('span', { class: 'psw-ring' })), h('div', { text: 'Open refusal / rectification case' }), h('div', { class: 'num', text: String(cs) }));
+    var pn = (PS.byBlock[PS.block] || []).filter(isPending).length;
+    if (pn) ap(rows, h('div', null, h('span', { class: 'sw pend-sw' })), h('div', { text: 'Waiting to send (saved on this phone)' }), h('div', { class: 'num', text: String(pn) }));
     if (off) ap(rows, h('div', null, h('span', { class: 'psw-off' })), h('div', { text: 'Out of scope (not counted)' }), h('div', { class: 'num', text: String(off) }));
     ap(tb, h('div', { class: 'tb-head' },
       h('div', { class: 'tb-blk', text: 'Block ' + PS.block + ' · sections' }), h('div', { class: 'tnum', text: plural(L.total, 'section') }),
@@ -819,6 +872,12 @@
     var stack = h('div', { class: 'stack' }, head);
     if (!p.active) ap(stack, h('div', { class: 'notice warn' }, h('strong', { text: 'Out of the monitoring scope' }), 'This section is not counted and cannot be updated.'));
     var hist = d && d !== 'loading' && d !== 'error' ? d.history : null, last = hist && hist[0];
+    var waits = OFF ? OFF.items.filter(function (it) { return it.fx && ((it.fx.list && it.fx.list.some(function (x) { return x.id === p.id; })) || it.fx.pile_id === p.id) && /^p/.test(it.fx.t); }) : [];
+    if (waits.length) {
+      ap(stack, h('div', { class: 'notice pend-note' }, h('strong', { text: waits.some(function (w) { return w.state === 'conflict' || w.state === 'failed'; }) ? 'Needs your decision. ' : 'Waiting to send. ' }),
+        h('span', { text: waits.map(function (w) { return w.label; }).join('; ') + '. Saved on this phone without signal; sent automatically when the connection is back. ' }),
+        h('button', { type: 'button', class: 'link-btn', text: 'Details', onclick: function () { OFF.openPanel(); } })));
+    }
     ap(stack, h('div', { class: 'act-card' },
       h('h3', { text: 'Installation status' }),
       h('div', null, stChip(st)),
@@ -861,7 +920,7 @@
       var s = PS.stById.get(u.status_id) || { color: '#999', label: u.status_label };
       return h('li', null,
         h('div', { class: 'hist-top' }, pchip(s.color, u.status_label), h('span', { class: 'hist-meta', text: 'from ' + (u.prev_label || 'Not Started') })),
-        h('div', { class: 'hist-meta', text: fmtTime(u.created_at) + ' · ' + (u.full_name || u.username) + (u.company_name ? ' · ' + u.company_name : '') + (u.source !== 'manual' ? ' · via ' + u.source : '') }),
+        h('div', { class: 'hist-meta', text: (u.offline && u.client_time ? fmtTime(u.client_time) + ' (saved without signal; received ' + fmtTime(u.created_at) + ')' : fmtTime(u.created_at)) + ' · ' + (u.full_name || u.username) + (u.company_name ? ' · ' + u.company_name : '') + (u.source !== 'manual' ? ' · via ' + u.source : '') }),
         u.remarks ? h('div', { class: 'hist-rem', text: u.remarks }) : null);
     })) : h('p', { class: 'small muted', text: 'No status saved yet: the section counts as Not Started.' }), true));
     ap(stack, box('Inspection records (' + d.inspections.length + ')', d.inspections.length ? h('ul', { class: 'hist' }, d.inspections.map(function (i) {
@@ -947,7 +1006,7 @@
   }
   function reviewStatus(list, sid, remarks) {
     var st = PS.stById.get(sid); if (!st) return;
-    var change = list.filter(function (p) { return stOf(p).id !== st.id || !PS.cur.has(p.id) && st.key !== 'not_started'; });
+    var change = list.filter(function (p) { return stOf(p).id !== st.id || !curP(p) && st.key !== 'not_started'; });
     var same = list.length - change.length, byCo = new Map(), prev = new Map(), blocks = new Set();
     change.forEach(function (p) {
       var c = coOf(p); byCo.set(c, (byCo.get(c) || 0) + 1);
@@ -971,11 +1030,22 @@
   }
   function saveStatus(list, st, remarks, btn) {
     var expected = {};
-    list.forEach(function (p) { var c = PS.cur.get(p.id); expected[p.id] = c ? c.uid : null; });
+    list.forEach(function (p) { var c = curP(p); expected[p.id] = c ? c.uid : null; });
     btn.disabled = true; btn.textContent = 'Saving…';
     var ids = list.map(function (p) { return p.id; });
-    call('submit_pile_updates', { p_pile_ids: ids, p_status_id: st.id, p_remarks: remarks || null, p_expected: expected }).then(function (r) {
+    var what = (list.length === 1 ? list[0].code : plural(list.length, 'section')) + ' · Piles → ' + st.label;
+    submitSave('submit_pile_updates', { p_pile_ids: ids, p_status_id: st.id, p_remarks: remarks || null, p_expected: expected }, {
+      label: what + (list.length > 1 ? ' (' + list.slice(0, 6).map(function (p) { return p.code; }).join(', ') + (list.length > 6 ? ' …' : '') + ')' : ''),
+      keys: ids.map(function (id) { return 'p:' + id; }),
+      fx: { t: 'pile', sid: st.id, list: list.map(function (p) { return { id: p.id, code: p.code }; }) }
+    }).then(function (r) {
       closeModal();
+      if (r && r.queued) {
+        toast(queuedNote(what), 'ok', 8000);
+        PS.form = null; PS.multi.clear(); PS.bulkStatus = null; PS.bulkRemarks = '';
+        PK.stale = true; drawKP(); renderLegend(); renderFilters(); renderPanel();
+        return;
+      }
       toast('Saved: ' + plural(r.changed, 'section') + ' now ' + st.label + (r.unchanged ? ' (' + r.unchanged + ' unchanged)' : '') + '.', 'ok', 7000);
       PS.form = null; PS.multi.clear(); PS.bulkStatus = null; PS.bulkRemarks = '';
       ids.forEach(function (id) { PS.detail.delete(id); });
@@ -1170,8 +1240,14 @@
     var btn = h('button', { type: 'button', class: 'btn primary', id: 'pi-confirm', text: 'Confirm and save ' + plural(list.length, 'inspection record') });
     btn.addEventListener('click', function () {
       btn.disabled = true; btn.textContent = 'Saving…';
-      call('record_pile_inspection', Object.assign({ p_pile_ids: list.map(function (p) { return p.id; }) }, F)).then(function (r) {
+      var what = 'Inspection ' + s.label + ' · ' + (list.length === 1 ? list[0].code : plural(list.length, 'section'));
+      submitSave('record_pile_inspection', Object.assign({ p_pile_ids: list.map(function (p) { return p.id; }) }, F), {
+        label: what + (ps ? ' (status → ' + ps.label + ')' : ''),
+        keys: list.map(function (p) { return (ps ? 'p:' : 'pi:') + p.id; }),
+        fx: { t: 'pinsp', sid: s.id, date: F.p_inspection_date, set: ps ? ps.id : null, list: list.map(function (p) { return { id: p.id, code: p.code }; }) }
+      }).then(function (r) {
         closeModal();
+        if (r && r.queued) { toast(queuedNote(what), 'ok', 8000); PS.multi.clear(); PK.stale = true; drawKP(); renderLegend(); renderPanel(); return; }
         toast('Saved ' + plural(r.saved, 'inspection record') + (ps ? '; ' + plural(r.status_set, 'section') + ' set to ' + ps.label : '') + '.', 'ok', 7000);
         PS.multi.clear(); list.forEach(function (p) { PS.detail.delete(p.id); });
         return refreshAfterSave(false).then(function () { if (PS.sel) loadDetail(PS.sel, true); });
@@ -1253,13 +1329,32 @@
     var btn = h('button', { type: 'button', class: 'btn primary', id: 'pc-confirm', text: 'Confirm and save' });
     btn.addEventListener('click', function () {
       btn.disabled = true; btn.textContent = 'Saving…';
-      call('save_pile_case', F).then(function (r) {
-        return uploadMany(p, files, 'case', r.case_id, F.p_remarks, F.p_corrective_action).then(function (n) {
-          closeModal();
-          toast((c ? 'Case updated' : 'Case #' + r.case_id + ' recorded') + (r.status_set && ps ? '; pile set to ' + ps.label : '') + (n ? '; ' + plural(n, 'file') + ' attached' : '') + '.', 'ok', 7000);
-          PS.detail.delete(p.id); return refreshAfterSave(false).then(function () { loadDetail(p.id, true); });
+      // photos are prepared first so they can wait on this phone together with the report
+      Promise.all(files.map(prepareFile)).then(function (ready) {
+        var what = (c ? 'Case #' + c.id + ' update' : CASE_KIND[F.p_kind] + ' report') + ' · ' + p.code;
+        var save = c ? call('save_pile_case', F) : submitSave('save_pile_case', F, {
+          label: what + (ready.length ? ' (+ ' + plural(ready.length, 'file') + ')' : ''),
+          keys: ['p:' + p.id, 'pc:' + p.id],
+          fx: { t: 'pcase', pile_id: p.id, code: p.code, kind: F.p_kind, set: F.p_set_status_id || null }
         });
-      }).catch(function (e) { closeModal(); toast(e.message, 'err', 12000); refreshAfterSave(false); });
+        return save.then(function (r) {
+          var caseRef = r && r.queued ? 'ref:' + r.ref : r.case_id;
+          return uploadPrepared(p, ready, 'case', caseRef, F.p_remarks, F.p_corrective_action).then(function (u) {
+            closeModal();
+            if ((r && r.queued) || u.queued) {
+              toast(queuedNote(what + (ready.length ? ' and ' + plural(ready.length, 'file') : '')), 'ok', 8000);
+              PS.detail.delete(p.id); PK.stale = true; drawKP(); renderLegend(); renderPanel();
+              return;
+            }
+            toast((c ? 'Case updated' : 'Case #' + r.case_id + ' recorded') + (r.status_set && ps ? '; pile set to ' + ps.label : '') + (u.n ? '; ' + plural(u.n, 'file') + ' attached' : '') + '.', 'ok', 7000);
+            PS.detail.delete(p.id); return refreshAfterSave(false).then(function () { loadDetail(p.id, true); });
+          });
+        });
+      }).catch(function (e) {
+        closeModal();
+        toast(e.hint === 'network' && c ? 'Updating an existing case needs a connection. New reports can be saved without signal.' : e.message, 'err', 12000);
+        refreshAfterSave(false);
+      });
     });
     openModal('Confirm ' + (c ? 'case update' : 'new case'), [
       h('dl', { class: 'confirm-dl' },
@@ -1311,15 +1406,23 @@
       });
     });
   }
-  function uploadMany(p, files, kind, caseId, remarks, corrective) {
-    var n = 0, chain = Promise.resolve();
-    files.forEach(function (f) {
-      chain = chain.then(function () { return prepareFile(f); }).then(function (x) {
-        return call('upload_pile_file', { p_pile_id: p.id, p_kind: kind, p_file_name: x.name, p_mime: x.mime, p_data: x.data, p_remarks: remarks || null,
-          p_corrective_action: corrective || null, p_case_id: caseId || null, p_inspection_id: null });
-      }).then(function () { n++; });
+  // files already reduced (prepareFile); each one waits on this phone when there is no signal
+  function uploadPrepared(p, ready, kind, caseId, remarks, corrective) {
+    var n = 0, queued = 0, chain = Promise.resolve();
+    ready.forEach(function (x) {
+      chain = chain.then(function () {
+        return submitSave('upload_pile_file', { p_pile_id: p.id, p_kind: kind, p_file_name: x.name, p_mime: x.mime, p_data: x.data, p_remarks: remarks || null,
+          p_corrective_action: corrective || null, p_case_id: caseId || null, p_inspection_id: null }, {
+          label: (FILE_KIND[kind] || 'File') + ' ' + x.name + ' · ' + p.code + ' (' + Math.max(1, Math.round(x.data.length * 0.75 / 1024)) + ' KB)',
+          keys: ['pf:' + p.id],
+          fx: { t: 'pfile', pile_id: p.id, code: p.code, name: x.name, kind: kind }
+        });
+      }).then(function (r) { if (r && r.queued) queued++; else n++; });
     });
-    return chain.then(function () { return n; });
+    return chain.then(function () { return { n: n, queued: queued }; });
+  }
+  function uploadMany(p, files, kind, caseId, remarks, corrective) {
+    return Promise.all(files.map(prepareFile)).then(function (ready) { return uploadPrepared(p, ready, kind, caseId, remarks, corrective); });
   }
   function uploadForm(p, caseId) {
     var d = PS.detail.get(p.id), cases = d && d.cases ? d.cases : [];
@@ -1337,8 +1440,10 @@
       if (!files.length) { err.textContent = 'Choose a photo or a PDF.'; err.hidden = false; return; }
       if (files.some(function (f) { return ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].indexOf(f.type) < 0; })) { err.textContent = 'Only photos (JPEG, PNG, WebP) and PDF files.'; err.hidden = false; return; }
       save.disabled = true; save.textContent = 'Uploading…';
-      uploadMany(p, files, fKind.value, fCase.value ? +fCase.value : null, fRem.value.trim(), fCor.value.trim()).then(function (n) {
-        closeModal(); toast(plural(n, 'file') + ' attached to ' + p.code + '.', 'ok'); PS.detail.delete(p.id);
+      uploadMany(p, files, fKind.value, fCase.value ? +fCase.value : null, fRem.value.trim(), fCor.value.trim()).then(function (u) {
+        closeModal(); PS.detail.delete(p.id);
+        if (u.queued) { toast(queuedNote(plural(u.queued, 'file') + ' for ' + p.code) + (u.n ? ' ' + plural(u.n, 'file') + ' already sent.' : ''), 'ok', 8000); PK.stale = true; drawKP(); renderPanel(); return; }
+        toast(plural(u.n, 'file') + ' attached to ' + p.code + '.', 'ok');
         return refreshAfterSave(false).then(function () { loadDetail(p.id, true); });
       }).catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; save.textContent = 'Upload'; });
     });
@@ -1434,6 +1539,10 @@
         compact ? null : h('p', { class: 'small', text: 'Current work status of your sections here (' + (sc.total || 0) + '): ' + Object.keys(CAT_LABEL).filter(function (k) { return sc[k]; }).map(function (k) { return CAT_LABEL[k] + ' ' + sc[k]; }).join(', ') + '.' }),
         t.remarks ? h('p', { class: 'small today-remarks', text: 'Instructions: ' + t.remarks }) : null));
     });
+    var waitingDone = 0;
+    pend().pile.forEach(function (v, id) { var st = PS.stById.get(v.sid), sv = PS.cur.get(id), sst = sv && PS.stById.get(sv.sid);
+      if (st && REPORTED[st.category] && !(sst && REPORTED[sst.category])) waitingDone++; });
+    if (waitingDone) ap(box, h('p', { class: 'small pend-line', text: plural(waitingDone, 'section') + ' reported complete on this phone ' + (waitingDone === 1 ? 'counts' : 'count') + ' once ' + (waitingDone === 1 ? 'it is' : 'they are') + ' sent.' }));
     if (!compact) ap(box, h('p', { class: 'small muted', text: 'Daily accomplished = sections first reported complete today (Philippine time), counted once per section. Acceptance by the inspector is counted separately.' }));
     return box;
   }

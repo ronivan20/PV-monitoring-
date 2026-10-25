@@ -750,3 +750,43 @@ input[type="color"] { width: 52px; height: 38px; padding: 2px; }
   .ptoday.compact .today-row { padding-top: 6px; margin-top: 4px; }
   .ptoday.compact .today-head { margin-bottom: 4px; }
 }
+
+/* ---------- working without signal (update 10) ---------- */
+.netchip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border: 0; border-radius: 15px; background: rgba(255,255,255,.12); color: #fff; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.netchip .net-dot { width: 8px; height: 8px; border-radius: 50%; background: #c7d0d9; }
+.netchip.off .net-dot { background: #9aa5b0; }
+.netchip.wait { background: #f3c12a; color: #15212c; }
+.netchip.wait .net-dot { background: #15212c; }
+.netchip.review { background: #c0262d; color: #fff; }
+.netchip.review .net-dot { background: #fff; }
+.netbar { flex: none; padding: 7px max(12px, env(safe-area-inset-left)); background: #fff4d6; color: #5c4400; border-bottom: 1px solid #f0d78c; font-size: 13px; line-height: 1.35; }
+.netbar.review { background: #fdeaea; color: #7a1418; border-bottom-color: #f2b8bb; }
+.netbar .link-btn { color: inherit; font-weight: 700; }
+.sync.wait { color: #8a6500; }
+.sync.wait .sync-dot { background: #f3c12a; }
+.kp .t.pend .h { stroke: var(--accent); stroke-width: 2.4px; stroke-dasharray: 5 3; }
+.kp .t.pend.sel .h { stroke-width: 3.5px; }
+.sw.pend-sw { background: #fff; border: 2px dashed var(--accent); }
+.pill.pend-pill { background: #e7f1fb; color: #123d8f; border: 1px dashed var(--accent); }
+.notice.pend-note { background: #e7f1fb; border: 1px dashed var(--accent); color: #123d8f; }
+.cm-thread.pending, .cm-reply.pending { border-left: 3px dashed var(--accent); padding-left: 8px; }
+.hist li.pending { border-left: 3px dashed var(--accent); padding-left: 8px; }
+.outbox { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.ob-item { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; background: var(--surface); }
+.ob-item.ob-conflict, .ob-item.ob-failed { border-color: #f2b8bb; background: #fff7f7; }
+.ob-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.ob-state { font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: #123d8f; }
+.ob-conflict .ob-state, .ob-failed .ob-state { color: #a1161c; }
+.ob-time { color: var(--ink-3); }
+.ob-label { font-weight: 600; overflow-wrap: anywhere; }
+.ob-msg { font-size: 13px; color: #7a1418; }
+.offline-note { color: #8a6500; }
+@media (max-width: 700px) {
+  .netchip { height: 28px; padding: 0 8px; font-size: 12px; }
+}
+.netchip .nc-short { display: none; }
+@media (max-width: 480px) {
+  .netchip .nc-long { display: none; }
+  .netchip .nc-short { display: inline; }
+}
+.pend-line { color: #123d8f; font-weight: 600; }

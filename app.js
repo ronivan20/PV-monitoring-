@@ -5,7 +5,17 @@
   'use strict';
 
   var CFG = window.PVM_CONFIG || {};
-  var DB_VERSION = 9;
+  // working without signal (offline.js, update 10); a stand-in keeps the app working if it is missing
+  var NOOP = function () {};
+  var OFF = window.PVMOffline || {
+    pend: { sec: new Map(), cci: new Map(), cm: new Map(), reply: new Map(), pile: new Map(), pinsp: new Map(), pcase: new Map(), pfile: new Map() },
+    items: [], online: true, hooks: {}, init: function () { return Promise.resolve(false); }, noteOnline: NOOP, noteOffline: NOOP, markStale: NOOP, fresh: NOOP,
+    setUser: function () { return Promise.resolve(); }, clearUser: NOOP, cacheable: function () { return false; }, cachePut: function () { return Promise.resolve(); },
+    cacheGet: function () { return Promise.resolve(null); }, cachePatch: NOOP, who: function () { return null; }, enabled: function () { return false; },
+    sync: function () { return Promise.resolve(); }, on: NOOP, count: function () { return 0; }, reviewCount: function () { return 0; }, render: NOOP,
+    openPanel: NOOP, forgetCache: function () { return Promise.resolve(); }, statusText: function () { return ''; }
+  };
+  var DB_VERSION = 10;
   // the table screens also work on update 7, so the site can be published before update 8 is run;
   // the Piles page then asks for update 8
   var MIN_DB_VERSION = 7;
@@ -80,6 +90,11 @@
   var dtFmt = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   var clockFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
   function fmtTime(iso) { if (!iso) return '—'; var d = new Date(iso); return isNaN(d) ? '—' : dtFmt.format(d); }
+  // a record saved without signal shows when it was made on the phone and when the server received it
+  function whenText(u) {
+    if (u && u.offline && u.client_time) return fmtTime(u.client_time) + ' (saved without signal; received ' + fmtTime(u.created_at) + ')';
+    return fmtTime(u && u.created_at);
+  }
   function fmtPct(n, d) {
     if (!d) return '0%';
     var p = 100 * n / d;
@@ -129,16 +144,22 @@
   function ApiError(message, hint, status, details) {
     var e = new Error(message); e.hint = hint || null; e.status = status || 0; e.details = details || null; return e;
   }
-  function rpc(fn, args) {
+  // timeoutMs: a weak signal can keep a request open for minutes; after the limit it counts as no signal
+  function rpc(fn, args, timeoutMs) {
     var headers = { 'Content-Type': 'application/json', apikey: CFG.supabaseKey };
     if (/^eyJ/.test(CFG.supabaseKey || '')) headers.Authorization = 'Bearer ' + CFG.supabaseKey;
     var url = String(CFG.supabaseUrl || '').replace(/\/+$/, '') + '/rest/v1/rpc/' + fn;
-    return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(args || {}), cache: 'no-store', credentials: 'omit' })
-      .catch(function () {
-        throw ApiError('Cannot reach the server. Check the internet connection, then try again.', 'network', 0);
-      })
+    var ctl = window.AbortController ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, timeoutMs || 45000) : null;
+    function noSignal() {
+      clearTimeout(timer); OFF.noteOffline();
+      return ApiError('Cannot reach the server. Check the internet connection, then try again.', 'network', 0);
+    }
+    return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(args || {}), cache: 'no-store', credentials: 'omit', signal: ctl ? ctl.signal : undefined })
+      .catch(function () { throw noSignal(); })
       .then(function (res) {
-        return res.text().then(function (txt) {
+        return res.text().catch(function () { throw noSignal(); }).then(function (txt) {
+          clearTimeout(timer); OFF.noteOnline();
           var data = null;
           try { data = txt ? JSON.parse(txt) : null; } catch (e) { data = null; }
           if (!res.ok) {
@@ -156,13 +177,34 @@
       });
   }
   // Calls that need a signed-in user: handles expired sessions in one place.
-  function call(fn, args) {
+  function call(fn, args, timeoutMs) {
     args = Object.assign({ p_token: S.token }, args || {});
-    return rpc(fn, args).catch(function (e) {
+    return (OFF.cacheable(fn) ? readRpc(fn, args, timeoutMs) : rpc(fn, args, timeoutMs)).catch(function (e) {
       if (e.hint === 'session') { signedOut(e.message); }
       else if (e.hint === 'password') { showPasswordScreen(true); }
       throw e;
     });
+  }
+  // Reads: the answer is kept on this phone; without signal the kept answer is shown instead.
+  function readRpc(fn, args, timeoutMs) {
+    return rpc(fn, args, timeoutMs || 25000).then(function (d) {
+      // the bootstrap names its user (the first one arrives before the user is known here)
+      OFF.cachePut(fn, args, d, d && d.user && d.user.id ? d.user.id : undefined);
+      return d;
+    }, function (e) {
+      if (e.hint !== 'network') throw e;
+      return OFF.cacheGet(fn, args).then(function (hit) {
+        if (!hit) throw ApiError('No signal, and this has not been saved on this phone yet. It opens once you are connected.', 'network', 0);
+        OFF.markStale(hit.at);
+        if (hit.data && typeof hit.data === 'object') hit.data.__savedAt = hit.at;
+        return hit.data;
+      });
+    });
+  }
+  // Field saves go through the outbox: sent at once when there is signal, kept on this phone otherwise.
+  function submitSave(fn, args, meta) { return OFF.submit ? OFF.submit(fn, args, meta) : call(fn, args); }
+  function queuedNote(what) {
+    return what + ' saved on this phone (no signal). It is sent automatically when the connection is back.';
   }
 
   // ------------------------------------------------------------------
@@ -182,7 +224,9 @@
     dash: { block: 'all', act: 'all', status: 'all', company: 'all', page: 0 },
     admin: { tab: 'accounts', users: null, log: null, reviewAll: false, afilter: { block: 'all', act: 'all', company: 'all', area: 'all', page: 0 } }
   };
-  function curOf(sid, act) { return S.cur.get(sid + '|' + act) || null; }
+  function curOf(sid, act) { return OFF.pend.sec.get(sid + '|' + act) || S.cur.get(sid + '|' + act) || null; }
+  function serverCurOf(sid, act) { return S.cur.get(sid + '|' + act) || null; }
+  function pendingSec(sid, act) { return OFF.pend.sec.get(sid + '|' + act) || null; }
   function statusOf(sid, act) { var u = curOf(sid, act); return u ? u.status : 'not_started'; }
   function isAdmin() { return !!S.user && S.user.role === 'admin'; }
   function canRfi() { return !!S.user && (S.user.role === 'admin' || !!S.user.can_manage_rfi); }
@@ -255,6 +299,7 @@
   }
   function signedOut(message) {
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
+    OFF.clearUser(); // unsent updates stay on this phone and are sent after the next sign-in
     resetScreenState();
     closeModal();
     showLogin(message || 'You have been logged out.');
@@ -281,18 +326,80 @@
     if (p.disp === 'assign' || p.disp === 'status') S.disp = p.disp;
     else if (ACTS.indexOf(p.disp) >= 0) { S.disp = 'status'; S.act = p.disp; } // saved by update 2
     if (ACTS.indexOf(p.act) >= 0) S.act = p.act;
+    wireOffline();
     var tok = store.get(LS_TOKEN);
-    if (!tok) { showLogin(); return; }
+    if (!tok) { OFF.init().then(function () { OFF.render(); }); showLogin(); return; }
     S.token = tok;
-    loadBootstrap().then(function () { afterLogin(); showApp(); }).catch(function (e) {
-      if (e.hint === 'password') return showPasswordScreen(true);
-      if (e.hint === 'session') { store.set(LS_TOKEN, null); S.token = null; return showLogin(); }
-      showLogin(e.message);
+    OFF.init().then(bootSaved).then(function (shown) {
+      var fresh = loadBootstrap();
+      if (!shown) return fresh.then(function () { afterLogin(); showApp(); }).catch(bootError);
+      fresh.then(function () { refreshAll(); }).catch(function (e) { if (e.hint !== 'network') bootError(e); });
     });
   }
+  function bootError(e) {
+    if (e.hint === 'password') return showPasswordScreen(true);
+    if (e.hint === 'session') { store.set(LS_TOKEN, null); S.token = null; OFF.clearUser(); return showLogin(); }
+    showLogin(e.hint === 'network' ? 'No signal, and this phone has no saved copy of the project data yet. Connect once to open the app; after that it also opens without signal.' : e.message);
+  }
+  // Opens at once with what this phone saved last time, so a weak signal does not keep the app
+  // waiting. The server's answer replaces it as soon as it arrives.
+  function bootSaved() {
+    var who = OFF.who();
+    if (!who) return false;
+    return Promise.all(['get_bootstrap', 'get_quality', 'get_comments'].map(function (fn) { return OFF.cacheGet(fn, {}, who.id); })).then(function (hits) {
+      if (!hits[0] || !hits[0].data || !hits[0].data.user || hits[0].data.user.id !== who.id) return false;
+      try {
+        hits[0].data.__savedAt = hits[0].at;
+        applyBoot(hits[0].data);
+        if (hits[1]) applyQuality(hits[1].data);
+        if (hits[2]) applyComments(hits[2].data);
+      } catch (e) { return false; }
+      OFF.markStale(hits[0].at);
+      afterLogin(); showApp();
+      return true;
+    });
+  }
+  // connects the outbox (offline.js) with this page
+  function wireOffline() {
+    OFF.hooks.transport = function (fn, args, t) { return call(fn, args, t); };
+    OFF.hooks.toast = toast;
+    OFF.hooks.refresh = function () {
+      var p = [poll(true)];
+      if (window.PVMPiles && window.PVMPiles.pollNow) p.push(window.PVMPiles.pollNow());
+      return Promise.all(p);
+    };
+    OFF.hooks.serverExpected = OFF.hooks.serverExpected || {};
+    OFF.hooks.serverExpected.submit_update = function (it) {
+      var u = serverCurOf(it.args.p_section_id, it.args.p_activity); it.args.p_expected_update_id = u ? u.id : null;
+    };
+    OFF.hooks.serverExpected.bulk_submit_update = function (it) {
+      var e = {}; (it.args.p_section_ids || []).forEach(function (id) { var u = serverCurOf(id, it.args.p_activity); e[id] = u ? u.id : null; });
+      it.args.p_expected = e;
+    };
+    OFF.on('change', function () {
+      if (offlineRaf) return;
+      offlineRaf = requestAnimationFrame(function () {
+        offlineRaf = 0;
+        renderSync();
+        if (!S.user) return;
+        if (S.page === 'keyplan' && KP.svg) { paintStatuses(); if (S.mode === 'details') renderPanel(); }
+        else if (S.page === 'dashboard') renderDashboard();
+      });
+    });
+    OFF.on('synced', function (it, res, first) {
+      if (first) return; // the screen that saved it already shows the result
+      if (it.fn === 'submit_update' && res && res.update) S.cur.set(res.update.section_id + '|' + res.update.activity, res.update);
+      if (it.fn === 'record_cci') clearTimeout(qTimer), qTimer = setTimeout(function () { loadQuality().then(function () { if (S.page === 'keyplan') paintStatuses(); renderPanel(); }).catch(NOOP); }, 600);
+      else if (it.fn === 'add_comment' || it.fn === 'reply_comment') loadComments().then(function () { if (S.page === 'keyplan' && S.mode === 'details') renderPanel(); else if (S.page === 'dashboard') renderDashboard(); }).catch(NOOP);
+      else if (it.fn === 'submit_update' || it.fn === 'bulk_submit_update') { clearTimeout(pTimer); pTimer = setTimeout(function () { poll(true); }, 600); }
+    });
+  }
+  var offlineRaf = 0, qTimer = null, pTimer = null;
 
   function loadBootstrap() {
-    return rpc('get_bootstrap', { p_token: S.token }).then(function (d) {
+    return readRpc('get_bootstrap', { p_token: S.token }, 45000).then(applyBoot).then(loadQuality).then(loadComments);
+  }
+  function applyBoot(d) {
       if (d.version < MIN_DB_VERSION || d.version > DB_VERSION) {
         throw ApiError(d.version < MIN_DB_VERSION
           ? 'The database needs the latest update (update ' + DB_VERSION + '). Ask the administrator to run it, then reload this page.'
@@ -327,19 +434,19 @@
       S.multi.forEach(function (id) { if (!S.sections.has(id)) S.multi.delete(id); });
       applyUser(d.user);
       KP.stale = true; // rebuild the keyplan with the new data; the zoom and position are kept
-    }).then(loadQuality).then(loadComments);
+      if (!d.__savedAt) OFF.fresh();
+      OFF.setUser(d.user, d.version);
   }
-  function loadComments() {
-    return rpc('get_comments', { p_token: S.token }).then(function (d) {
+  function loadComments() { return readRpc('get_comments', { p_token: S.token }).then(applyComments); }
+  function applyComments(d) {
       var list = d.comments || [], sig = list.map(function (c) { return c.id + ':' + c.status + ':' + c.replies.length; }).join(',');
       var changed = sig !== S.cm.sig;
       S.cm = { list: list, canComment: !!d.can_comment, bySec: new Map(), sig: sig };
       list.forEach(function (c) { var l = S.cm.bySec.get(c.section_id) || []; l.push(c); S.cm.bySec.set(c.section_id, l); });
       return changed;
-    });
   }
-  function loadQuality() {
-    return rpc('get_quality', { p_token: S.token }).then(function (d) {
+  function loadQuality() { return readRpc('get_quality', { p_token: S.token }).then(applyQuality); }
+  function applyQuality(d) {
       var Q = S.q;
       Q.canCci = !!d.can_record_cci; Q.cats = d.categories || [];
       Q.cci = new Map(); (d.cci || []).forEach(function (r) { Q.cci.set(r.section_id + '|' + (r.activity || 'both'), r); });
@@ -349,7 +456,6 @@
         Q.rfiById.set(r.id, r);
         r.section_ids.forEach(function (sid) { var l = Q.rfiBySec.get(sid) || []; l.push(r); Q.rfiBySec.set(sid, l); });
       });
-    });
   }
 
   // first view after signing in: subcontractors start on the status of their own activity and block
@@ -534,6 +640,7 @@
     } else if (!s.code) c += ' noid';
     else if (!s.is_active) c += ' off';
     else c += ' s-' + statusOf(s.id, S.act);
+    if ((S.disp === 'status' && OFF.pend.sec.has(s.id + '|' + S.act)) || (S.disp === 'cci' && (OFF.pend.cci.has(s.id + '|' + S.act) || OFF.pend.cci.has(s.id + '|both')))) c += ' pend';
     if (s.id === S.selected) c += ' sel';
     if (S.multi.has(s.id)) c += ' msel';
     if (dimmed(s)) c += ' dim';
@@ -855,6 +962,8 @@
     tb.setAttribute('data-disp', S.disp); tb.setAttribute('data-act', S.act);
     var rows = h('div', { class: 'tb-rows' });
     L.rows.forEach(function (r) { rows.append(h('div', null, r.sw()), h('div', { text: r.label }), h('div', { class: 'num', text: String(r.n) })); });
+    var pendN = (S.secByBlock[S.block] || []).filter(function (x) { return / pend/.test(secClass(x)); }).length;
+    if (pendN) rows.append(h('div', null, h('span', { class: 'sw pend-sw' })), h('div', { text: 'Waiting to send (saved on this phone)' }), h('div', { class: 'num', text: String(pendN) }));
     tb.append(h('div', { class: 'tb-head' },
       h('div', { class: 'tb-blk', text: 'Block ' + S.block }),
       h('div', { class: 'tnum', text: L.total + ' sections' }),
@@ -1248,9 +1357,11 @@
       kv.append(
         h('dt', { text: 'Saved for' }), h('dd', null, h('strong', { text: u.company_name })),
         h('dt', { text: 'Updated by' }), h('dd', { text: u.full_name ? u.full_name + ' (' + u.username + ')' : u.username }),
-        h('dt', { text: 'Date & time' }), h('dd', { text: fmtTime(u.created_at) }));
+        h('dt', { text: 'Date & time' }), h('dd', { text: u.pending ? fmtTime(u.created_at) + ' (on this phone)' : whenText(u) }));
       if (u.remarks) kv.append(h('dt', { text: 'Remarks' }), h('dd', { text: u.remarks }));
     }
+    if (u && u.pending) card.append(h('div', { class: 'notice pend-note' }, h('strong', { text: u.state === 'conflict' ? 'Needs your decision. ' : u.state === 'failed' ? 'Not accepted by the server. ' : 'Waiting to send. ' }),
+      'Saved on this phone without signal; sent automatically when the connection is back. ', h('button', { type: 'button', class: 'link-btn', text: 'Details', onclick: function () { OFF.openPanel(); } })));
     card.append(kv);
     if (!u) card.append(h('p', { class: 'small muted', text: 'No update recorded yet.' }));
     if (canUpdate(s, act)) {
@@ -1271,16 +1382,17 @@
     if (hist === undefined || hist === 'loading') box.append(h('p', { class: 'small muted', text: 'Loading history…' }));
     else if (hist === 'error') box.append(h('p', { class: 'small muted', text: 'Could not load the history. It will retry on the next refresh.' }));
     else {
-      var items = hist.history.map(function (u) { return { at: u.created_at, u: u }; })
+      var waiting = ACTS.map(function (a) { return pendingSec(s.id, a); }).filter(Boolean);
+      var items = waiting.concat(hist.history).map(function (u) { return { at: u.created_at, u: u }; })
         .concat(hist.assignments.map(function (a) { return { at: a.at, a: a }; }))
         .sort(function (x, y) { return x.at < y.at ? 1 : -1; });
       if (!items.length) box.append(h('p', { class: 'small muted', text: 'No changes recorded yet.' }));
       else box.append(h('ul', { class: 'hist' }, items.map(function (it) {
         if (it.u) {
           var u = it.u;
-          return h('li', null,
-            h('div', { class: 'hist-top' }, h('strong', { text: ACT_SHORT[u.activity] }), chip(u.status)),
-            h('div', { class: 'hist-meta', text: fmtTime(u.created_at) + ' · ' + u.company_name + ' · by ' + u.username }),
+          return h('li', u.pending ? { class: 'pending' } : null,
+            h('div', { class: 'hist-top' }, h('strong', { text: ACT_SHORT[u.activity] }), chip(u.status), u.pending ? h('span', { class: 'pill pend-pill', text: 'Waiting to send' }) : null),
+            h('div', { class: 'hist-meta', text: (u.pending ? fmtTime(u.created_at) + ' on this phone' : whenText(u)) + ' · ' + u.company_name + ' · by ' + u.username }),
             u.remarks ? h('div', { class: 'hist-rem', text: u.remarks }) : null);
         }
         var a = it.a;
@@ -1393,10 +1505,20 @@
     var f = S.form, s = S.sections.get(f.sid);
     btn.disabled = true; btn.textContent = 'Saving…';
     $$('#panel button').forEach(function (b) { b.disabled = true; });
-    call('submit_update', {
+    var coId = asgOf(s.id, f.act) ? asgOf(s.id, f.act).company_id : f.company;
+    submitSave('submit_update', {
       p_section_id: s.id, p_activity: f.act, p_status: f.status, p_company_id: asgOf(s.id, f.act) ? null : f.company,
       p_remarks: f.remarks.trim() || null, p_expected_update_id: f.base
+    }, {
+      label: s.code + ' · ' + ACT_SHORT[f.act] + ' → ' + ST_LABEL[f.status],
+      keys: ['s:' + s.id + '|' + f.act],
+      fx: { t: 'sec', act: f.act, status: f.status, remarks: f.remarks.trim() || null, list: [{ id: s.id, code: s.code, company_id: coId, company_name: companyName(coId) }] }
     }).then(function (d) {
+      if (d && d.queued) {
+        S.mode = 'details'; S.form = null; paintStatuses(); renderPanel();
+        toast(queuedNote(s.code + ' · ' + ACT_SHORT[f.act] + ' → ' + ST_LABEL[f.status]), 'ok', 8000);
+        return;
+      }
       var u = d.update;
       S.cur.set(u.section_id + '|' + u.activity, u);
       S.mode = 'details'; S.form = null;
@@ -1495,8 +1617,10 @@
     if (document.hidden && !force) return Promise.resolve();
     S.polling = true;
     if (S.page === 'piles' && window.PVMPiles && window.PVMPiles.poll) window.PVMPiles.poll(force);
-    return call('get_changes', { p_since: S.serverTime }).then(function (d) {
+    return call('get_changes', { p_since: S.serverTime }, 20000).then(function (d) {
       S.serverTime = d.server_time; S.lastSync = new Date(); S.syncErr = false;
+      OFF.fresh();
+      if (OFF.count()) OFF.sync();
       loadComments().then(function (changed) {
         if (!changed) return;
         if (S.page === 'dashboard') renderDashboard();
@@ -1512,6 +1636,12 @@
         var k = u.section_id + '|' + u.activity, prev = S.cur.get(k);
         if (!prev || prev.id < u.id) { S.cur.set(k, u); changed.push(u); }
       });
+      if (changed.length || Date.now() - (S.savedCopyAt || 0) > 600000) {
+        // the copy kept on this phone follows the merged state (no extra download)
+        S.savedCopyAt = Date.now();
+        var curList = JSON.parse(JSON.stringify(Array.from(S.cur.values()))), st = S.serverTime;
+        OFF.cachePatch('get_bootstrap', {}, function (b) { b.current = curList; b.server_time = st; return b; });
+      }
       if (changed.length) {
         loadMyTarget();
         if (S.page === 'dashboard' || (S.page === 'admin' && S.admin.tab === 'targets')) S.tgt.data = null;
@@ -1543,9 +1673,13 @@
   }
   function renderSync() {
     var el = $('#sync'); if (!el) return;
-    el.classList.toggle('ok', !S.syncErr && !!S.lastSync);
-    el.classList.toggle('err', !!S.syncErr);
-    $('#sync-text').textContent = S.syncErr ? 'Offline · retrying' : S.lastSync ? 'Updated ' + clockFmt.format(S.lastSync) : 'Connecting…';
+    var off = !!S.syncErr || !OFF.online, n = OFF.count();
+    el.classList.toggle('ok', !off && !!S.lastSync && !n);
+    el.classList.toggle('err', off);
+    el.classList.toggle('wait', !off && !!n);
+    $('#sync-text').textContent = off ? (n ? 'Offline · ' + n + ' to send' : 'Offline · saved data')
+      : n ? n + ' to send' : S.lastSync ? 'Updated ' + clockFmt.format(S.lastSync) : 'Connecting…';
+    OFF.render();
   }
 
   // ------------------------------------------------------------------
@@ -1579,6 +1713,9 @@
       h('div', { class: 'btn-row' },
         h('button', { type: 'button', class: 'btn small', text: 'Download current status (CSV)', onclick: exportCurrent }),
         h('button', { type: 'button', class: 'btn small', text: 'Download full history (CSV)', onclick: exportHistory }))));
+    if (OFF.pend.sec.size) root.append(h('div', { class: 'notice pend-note' }, h('strong', { text: 'Includes updates not sent yet' }),
+      'The status counts below include ' + plural(OFF.pend.sec.size, 'section update') + ' saved on this phone without signal. Downloads and the target figures show only what the server has. ',
+      h('button', { type: 'button', class: 'link-btn', text: 'Details', onclick: function () { OFF.openPanel(); } })));
     if (isSub()) { var big = todayTargetCard(false); if (big) root.append(big); }
     root.append(renderTargetBoard());
     root.append(renderCciBoard(blocks, F));
@@ -1789,7 +1926,7 @@
       var flags = (p.flags || []).concat(s.flags || []).map(function (f) { return FLAG_LABEL[f] || f; }).join('; ');
       var r = [s.block, s.code || '(no section ID)', p.code || '(no ID in drawing)', s.side ? SIDE_LABEL[s.side] : '?', counted(s) ? 'Yes' : 'No', flags];
       ACTS.forEach(function (act) {
-        var u = curOf(s.id, act), a = asgOf(s.id, act);
+        var u = serverCurOf(s.id, act), a = asgOf(s.id, act);
         r.push(a ? companyName(a.company_id) : 'Unassigned', a ? a.area : '',
           counted(s) ? ST_LABEL[u ? u.status : 'not_started'] : '', u ? u.company_name : '', u ? u.username : '', u ? fmtTime(u.created_at) : '', u && u.remarks ? u.remarks : '');
       });
@@ -1911,9 +2048,20 @@
     var act = S.act, expected = {};
     sel.forEach(function (x) { var u = curOf(x.id, act); expected[x.id] = u ? u.id : null; });
     btn.disabled = true; btn.textContent = 'Saving…';
-    call('bulk_submit_update', { p_section_ids: sel.map(function (x) { return x.id; }), p_activity: act, p_status: S.bulkStatus, p_remarks: S.bulkRemarks || null, p_expected: expected })
+    var bst = S.bulkStatus;
+    submitSave('bulk_submit_update', { p_section_ids: sel.map(function (x) { return x.id; }), p_activity: act, p_status: bst, p_remarks: S.bulkRemarks || null, p_expected: expected }, {
+      label: plural(sel.length, 'section') + ' · ' + ACT_SHORT[act] + ' → ' + ST_LABEL[bst] + ' (' + sel.slice(0, 6).map(secLabel).join(', ') + (sel.length > 6 ? ' …' : '') + ')',
+      keys: sel.map(function (x) { return 's:' + x.id + '|' + act; }),
+      fx: { t: 'sec', act: act, status: bst, remarks: S.bulkRemarks || null, list: sel.map(function (x) { var a = asgOf(x.id, act); return { id: x.id, code: x.code, company_id: a && a.company_id, company_name: a ? companyName(a.company_id) : '' }; }) }
+    })
       .then(function (r) {
         closeModal();
+        if (r && r.queued) {
+          toast(queuedNote(plural(sel.length, 'section') + ' · ' + ACT_SHORT[act] + ' → ' + ST_LABEL[bst]), 'ok', 8000);
+          S.multi.clear(); S.bulkStatus = null; S.bulkRemarks = '';
+          paintStatuses(); renderPanel();
+          return;
+        }
         toast('Saved ' + plural(r.changed, 'section') + ' as ' + ST_LABEL[S.bulkStatus] + ' for ' + ACT_SHORT[act] + (r.unchanged ? ' (' + r.unchanged + ' unchanged).' : '.'), 'ok', 7000);
         S.multi.clear(); S.bulkStatus = null; S.bulkRemarks = '';
         return loadBootstrap().then(function () { refreshAll(); });
@@ -1975,6 +2123,9 @@
         compact ? null : h('p', { class: 'small', text: 'Your assigned ' + ACT_SHORT[t.activity] + ' work in ' + areaLabel(t) + ': ' + (sc.completed || 0) + ' Completed, ' + (sc.ongoing || 0) + ' Ongoing, ' + (sc.on_hold || 0) + ' On Hold, ' + (sc.not_started || 0) + ' Not Started of ' + (sc.total || 0) + '.' }),
         t.remarks ? h('p', { class: 'small today-remarks', text: 'Instructions: ' + t.remarks }) : null));
     });
+    var waitingDone = 0;
+    OFF.pend.sec.forEach(function (u) { var sv = S.cur.get(u.section_id + '|' + u.activity); if (u.status === 'completed' && !(sv && sv.status === 'completed')) waitingDone++; });
+    if (waitingDone) box.append(h('p', { class: 'small pend-line', text: plural(waitingDone, 'section') + ' saved as Completed on this phone ' + (waitingDone === 1 ? 'counts' : 'count') + ' once ' + (waitingDone === 1 ? 'it is' : 'they are') + ' sent.' }));
     if (!compact) box.append(h('p', { class: 'small muted', text: 'Accomplished = sections first saved as Completed today (Philippine time). Saving the same section again does not count twice.' }));
     return box;
   }
@@ -2183,6 +2334,8 @@
   // ------------------------------------------------------------------
   // latest CCI record for a section and activity (a record for both activities counts for each)
   function cciOf(sid, act) {
+    var pa = OFF.pend.cci.get(sid + '|' + act), pb = OFF.pend.cci.get(sid + '|both');
+    if (pa || pb) return pa && pb ? (pa.created_at > pb.created_at ? pa : pb) : (pa || pb);
     var a = S.q.cci.get(sid + '|' + act), b = S.q.cci.get(sid + '|both');
     if (a && b) return a.id > b.id ? a : b;
     return a || b || null;
@@ -2267,11 +2420,19 @@
     var btn = h('button', { type: 'button', class: 'btn primary', id: 'btn-cci-confirm', text: 'Confirm and save ' + plural(list.length, 'record') });
     btn.addEventListener('click', function () {
       btn.disabled = true; btn.textContent = 'Saving…';
-      call('record_cci', { p_section_ids: list.map(function (x) { return x.id; }), p_activity: F.act === 'both' ? null : F.act, p_status: F.status,
+      submitSave('record_cci', { p_section_ids: list.map(function (x) { return x.id; }), p_activity: F.act === 'both' ? null : F.act, p_status: F.status,
         p_inspection_date: F.insp || null, p_approval_date: F.appr || null, p_reinspection_date: F.rein || null,
         p_comment_categories: F.cc, p_issue_categories: F.ic, p_cci_comments: F.com || null, p_issues: F.iss || null,
-        p_admin_remarks: F.rem || null, p_corrective_action: F.ca || null })
-        .then(function (r) { closeModal(); toast('CCI result saved for ' + plural(r.saved, 'section') + '.', 'ok', 6000); S.multi.clear(); return qualityRefresh(); })
+        p_admin_remarks: F.rem || null, p_corrective_action: F.ca || null }, {
+        label: 'CCI ' + CCI_LABEL[F.status] + ' · ' + (F.act === 'both' ? 'both activities' : ACT_SHORT[F.act]) + ' · ' + (list.length === 1 ? secLabel(list[0]) : plural(list.length, 'section')),
+        keys: list.map(function (x) { return 'q:' + x.id; }),
+        fx: { t: 'cci', act: F.act === 'both' ? null : F.act, status: F.status, insp: F.insp || null, appr: F.appr || null, list: list.map(function (x) { return { id: x.id, code: x.code }; }) }
+      })
+        .then(function (r) {
+          closeModal(); S.multi.clear();
+          if (r && r.queued) { toast(queuedNote('CCI result for ' + plural(list.length, 'section')), 'ok', 8000); paintStatuses(); renderPanel(); return; }
+          toast('CCI result saved for ' + plural(r.saved, 'section') + '.', 'ok', 6000); return qualityRefresh();
+        })
         .catch(function (e) { btn.disabled = false; btn.textContent = 'Confirm and save'; if (e.hint !== 'session') toast(e.message, 'err', 8000); });
     });
     function row(k, v) { return v ? [h('dt', { text: k }), h('dd', null, v)] : null; }
@@ -2615,15 +2776,24 @@
         h('div', { class: 'small muted', text: r.username + (r.company_name ? ' · ' + r.company_name : '') + ' · ' + fmtTime(r.created_at) + (r.new_status ? ' · ' + CM_STATUS[r.prev_status] + ' → ' + CM_STATUS[r.new_status] : '') }),
         r.body ? h('p', { text: r.body }) : null));
     });
+    (OFF.pend.reply.get(String(c.id)) || []).forEach(function (r) {
+      box.append(h('div', { class: 'cm-reply pending' },
+        h('div', { class: 'small', text: 'Waiting to send · saved on this phone ' + fmtTime(r.created_at) + (r.status ? ' · → ' + CM_STATUS[r.status] : '') }),
+        r.body ? h('p', { text: r.body }) : null));
+    });
     if (isAdmin() || isClient() || isSub()) box.append(h('button', { type: 'button', class: 'btn small', text: 'Reply / follow up', onclick: function () { replyForm(c); } }));
     return box;
   }
   function commentsCard(s) {
     if (!s.code || !(isAdmin() || isClient() || isSub())) return null;
-    var list = S.cm.bySec.get(s.id) || [];
-    if (!list.length && !S.cm.canComment) return null;
+    var list = S.cm.bySec.get(s.id) || [], waiting = OFF.pend.cm.get(s.id) || [];
+    if (!list.length && !waiting.length && !S.cm.canComment) return null;
     var card = h('section', { class: 'act-card cm-card', 'aria-label': 'Client comments' }, h('h3', { text: 'Client comments' + (list.length ? ' (' + list.length + ')' : '') }));
-    if (!list.length) card.append(h('p', { class: 'small muted', text: 'No comments on this section yet.' }));
+    if (!list.length && !waiting.length) card.append(h('p', { class: 'small muted', text: 'No comments on this section yet.' }));
+    waiting.forEach(function (c) {
+      card.append(h('div', { class: 'cm-thread pending' }, h('div', { class: 'cm-head' }, h('span', { class: 'pill pend-pill', text: 'Waiting to send' }),
+        h('span', { class: 'small', text: (c.activity ? ACT_SHORT[c.activity] : 'General') + ' · saved on this phone ' + fmtTime(c.created_at) })), h('p', { class: 'cm-body', text: c.body })));
+    });
     list.forEach(function (c) { card.append(commentThread(c, false)); });
     if (S.cm.canComment) card.append(h('button', { type: 'button', class: 'btn primary small', id: 'btn-add-comment', text: 'Add comment', onclick: function () { commentForm(s); } }));
     return card;
@@ -2635,8 +2805,15 @@
     var save = h('button', { type: 'button', class: 'btn primary', id: 'cm-save', text: 'Submit comment' });
     save.addEventListener('click', function () {
       save.disabled = true; err.hidden = true;
-      call('add_comment', { p_section_id: s.id, p_activity: act.value || null, p_body: body.value })
-        .then(loadComments).then(function () { closeModal(); toast('Comment submitted on ' + secLabel(s) + '.', 'ok'); renderPanel(); })
+      submitSave('add_comment', { p_section_id: s.id, p_activity: act.value || null, p_body: body.value }, {
+        label: 'Comment on ' + secLabel(s) + ': ' + body.value.trim().slice(0, 80),
+        keys: ['c:' + s.id],
+        fx: { t: 'cm', section_id: s.id, act: act.value || null, body: body.value.trim() }
+      })
+        .then(function (r) {
+          if (r && r.queued) { closeModal(); toast(queuedNote('Comment on ' + secLabel(s)), 'ok', 8000); renderPanel(); return; }
+          return loadComments().then(function () { closeModal(); toast('Comment submitted on ' + secLabel(s) + '.', 'ok'); renderPanel(); });
+        })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
     openModal('Comment on ' + secLabel(s), [
@@ -2653,8 +2830,15 @@
     var save = h('button', { type: 'button', class: 'btn primary', id: 'cm-reply-save', text: 'Save reply' });
     save.addEventListener('click', function () {
       save.disabled = true; err.hidden = true;
-      call('reply_comment', { p_comment_id: c.id, p_body: body.value, p_status: st.value || null })
-        .then(loadComments).then(function () { closeModal(); toast('Reply saved.', 'ok'); if (S.page === 'dashboard') renderDashboard(); else renderPanel(); })
+      submitSave('reply_comment', { p_comment_id: c.id, p_body: body.value, p_status: st.value || null }, {
+        label: 'Reply on ' + c.section_code + ': ' + (body.value.trim() || CM_STATUS[st.value] || '').slice(0, 80),
+        keys: ['r:' + c.id],
+        fx: { t: 'reply', comment_id: c.id, body: body.value.trim(), status: st.value || null }
+      })
+        .then(function (r) {
+          if (r && r.queued) { closeModal(); toast(queuedNote('Reply'), 'ok', 8000); if (S.page === 'dashboard') renderDashboard(); else renderPanel(); return; }
+          return loadComments().then(function () { closeModal(); toast('Reply saved.', 'ok'); if (S.page === 'dashboard') renderDashboard(); else renderPanel(); });
+        })
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
     openModal('Reply · ' + c.section_code, [
@@ -3177,7 +3361,8 @@
         return [h('span', { class: 'sw s-' + s }), h('strong', { text: ST_LABEL[s] }), h('span', { class: 'small muted', text: d })];
       })),
       h('p', { class: 'small', text: 'Subcontractors can update only the sections and the activity assigned to their company: a Mounting Structure assignment does not allow PV Module updates, and the other way round. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
-      h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' })]);
+      h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' }),
+      h('p', { class: 'small', text: 'No signal? Keep working. The keyplan shows what this phone saved last, and updates you save are kept on the phone (dashed blue outline, "Waiting to send") and sent automatically when the signal is back. If someone else changed the same section meanwhile, the app asks you whether to keep your update.' })]);
   }
   function openChangePassword() {
     var fCur = h('input', { id: 'cp-cur', type: 'password', autocomplete: 'current-password', maxlength: 100 });
@@ -3200,7 +3385,23 @@
       err, h('div', { class: 'btn-row' }, save, h('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: closeModal }))]);
   }
   function logout() {
-    var tok = S.token;
+    var n = OFF.count();
+    if (n && S.user) {
+      $('#user-pop').hidden = true;
+      var go = h('button', { type: 'button', class: 'btn danger', id: 'btn-logout-anyway', text: 'Log out, keep them on this phone', onclick: function () { closeModal(); doLogout(true); } });
+      openModal('Updates not sent yet', [
+        h('p', { text: (n === 1 ? '1 update' : n + ' updates') + ' saved on this phone without signal ' + (n === 1 ? 'has' : 'have') + ' not been sent yet.' }),
+        h('p', { class: 'small', text: 'If you log out now they stay on this phone and are sent the next time you sign in here. Staying signed in sends them as soon as there is signal.' }),
+        h('div', { class: 'btn-row' }, h('button', { type: 'button', class: 'btn primary', text: 'Stay signed in', onclick: closeModal }), go,
+          h('button', { type: 'button', class: 'btn', text: 'See them', onclick: function () { OFF.openPanel(); } }))]);
+      return;
+    }
+    doLogout(false);
+  }
+  function doLogout(keepOutbox) {
+    var tok = S.token, uid = S.user && S.user.id;
+    if (uid) OFF.forgetCache(uid); // the project data saved on this phone goes with the sign-in
+    OFF.clearUser();
     stopPolling();
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
     resetScreenState();
