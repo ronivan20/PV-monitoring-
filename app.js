@@ -38,8 +38,16 @@
     id_format: 'ID written differently',
     duplicate_label: 'Drawn twice in DWG',
     half_outline: 'Only one half drawn',
-    split_unresolved: 'West/East not confirmed'
+    split_unresolved: 'West/East not confirmed',
+    from_photo: 'Added from drone photo'
   };
+  // where a table's outline comes from: DWG object handles, or (update 11) "photo:<photo id>:<ID>" for a
+  // table seen installed on a drone photo but not drawn in the DWG
+  function dwgSource(ref, plural) {
+    var m = /^photo:b\d+-(\d{4})(\d{2})(\d{2}):/.exec(String(ref || ''));
+    if (m) return 'Not in the DWG: added from the drone photo of ' + new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+    return (plural ? 'DWG object handles ' : 'DWG object handle ') + String(ref || '').replace(/\+/g, ' + ');
+  }
   // contractor colours (the database sends the same list; kept clear of the status colours)
   var PALETTE = ['#2563eb', '#92400e', '#0f766e', '#38bdf8', '#1e293b', '#86198f', '#a78bfa', '#7c3aed', '#0891b2', '#1e3a8a', '#c026d3'];
   var BLOCKS = [1, 5];
@@ -1360,7 +1368,7 @@
         return h('div', { class: 'sibling' }, h('span', { text: ACT_SHORT[act] + ':' }), cchip(a && a.company_id));
       })));
     }
-    stack.append(flagNotices(s));
+    append(stack, flagNotices(s)); // a list of notices (Element.append would print it as text)
     var rcard = rfiCard(s); if (rcard) stack.append(rcard);
     if (s.code) {
       [S.act, otherAct(S.act)].forEach(function (act) { stack.append(actCard(s, act)); }); // activity on screen first
@@ -3279,7 +3287,7 @@
     var toggle = h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: A.reviewAll, onchange: function (e) { A.reviewAll = e.target.checked; renderAdmin(); } }),
       h('span', { text: 'Also show items already marked as checked' }));
     var card = h('div', { class: 'card' }, h('h2', { text: 'Drawing items to review' }),
-      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and splitting each table into West and East sections. Nothing was guessed: sections without an ID stay out of all counts until you resolve them.' }),
+      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and splitting each table into West and East sections, plus tables seen installed on a drone photo but not drawn in the DWG (added on request). Nothing was guessed: sections without an ID stay out of all counts until you resolve them.' }),
       toggle);
     if (!list.length) card.append(h('div', { class: 'empty-state', text: 'Nothing open for review.' }));
     else card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
@@ -3319,7 +3327,7 @@
     });
     var flagsTxt = (t.flags || []).map(function (f) { return FLAG_LABEL[f] || f; }).join(' · ');
     openModal('Table info · ' + (t.code || 'table without ID'), [
-      h('p', { class: 'small muted', text: 'Block ' + t.block + ' · DWG object handles ' + String(t.dwg_ref || '').replace(/\+/g, ' + ') }),
+      h('p', { class: 'small muted', text: 'Block ' + t.block + ' · ' + dwgSource(t.dwg_ref, true) }),
       flagsTxt ? h('div', { class: 'notice warn' }, h('strong', { text: flagsTxt }), t.flag_notes || '') : null,
       h('div', { class: 'field' }, h('label', { for: 't-code', text: 'Table ID (exactly as on the drawing)' }), fCode,
         h('p', { class: 'hint', text: 'Its sections become this ID + W and this ID + E. Earlier records keep the ID they were saved with.' })),
@@ -3351,7 +3359,7 @@
         .catch(function (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; });
     });
     openModal('Section · ' + secLabel(s), [
-      h('p', { class: 'small muted', text: 'Table ' + (p.code || '(no ID)') + ' · Block ' + s.block + ' · DWG object handle ' + s.dwg_ref }),
+      h('p', { class: 'small muted', text: 'Table ' + (p.code || '(no ID)') + ' · Block ' + s.block + ' · ' + dwgSource(s.dwg_ref, false) }),
       s.flag_notes ? h('div', { class: 'notice warn', text: s.flag_notes }) : null,
       h('div', { class: 'field' }, h('label', { for: 's-side', text: 'Side' }), fSide,
         h('p', { class: 'hint', text: 'Only change this after checking the drawing or the site. The section ID becomes the table ID + W or E.' })),

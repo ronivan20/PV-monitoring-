@@ -10,7 +10,7 @@ usage:
       --key secrets/drone_key.b64 --site <site folder> [--margin 100] [--quality 80]
 writes <site>/drone/<id>/r<rev>/<level>/<col>_<row>.bin and updates <site>/drone/index.json
 """
-import argparse, base64, io, json, math, os, time
+import argparse, base64, hashlib, io, json, math, os, time
 import numpy as np, cv2
 from PIL import Image
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -29,6 +29,8 @@ ap.add_argument('--site', required=True)
 ap.add_argument('--margin', type=float, default=100.0, help='metres of photo kept around the keyplan sheet')
 ap.add_argument('--quality', type=int, default=80)
 ap.add_argument('--rev', type=int, default=1, help='version of this photo\'s tiles; raise it when the same photo is made again')
+ap.add_argument('--interp', choices=['linear', 'cubic', 'lanczos'], default='lanczos',
+                help='resampling of the photo into keyplan metres (lanczos keeps the most detail)')
 a = ap.parse_args()
 
 t0 = time.time()
@@ -75,7 +77,8 @@ print('kept %.1f x %.1f m from (%.2f, %.2f): %d x %d px at %.2f m/px' % (x1 - x0
 # output pixel (i, j) centre -> metres -> photo pixel
 D = np.array([[MPP0, 0, x0 + MPP0 / 2], [0, MPP0, y0 + MPP0 / 2], [0, 0, 1]])
 Minv = np.linalg.inv(F) @ D
-out = cv2.warpAffine(src, Minv[:2], (W, H), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+INTERP = {'linear': cv2.INTER_LINEAR, 'cubic': cv2.INTER_CUBIC, 'lanczos': cv2.INTER_LANCZOS4}[a.interp]
+out = cv2.warpAffine(src, Minv[:2], (W, H), flags=INTERP | cv2.WARP_INVERSE_MAP,
                      borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
 del src
 print('resampled (%.0fs)' % (time.time() - t0), flush=True)
@@ -137,7 +140,9 @@ for li, (mpp, img) in enumerate(levels):
     man_levels.append({'mpp': round(mpp, 4), 'w': ww, 'h': hh, 'cols': cols, 'rows': rows, 'have': ''.join(have)})
     print('level %d: %.2f m/px, %dx%d px, %d of %d tiles' % (li, mpp, ww, hh, have.count('1'), cols * rows), flush=True)
 
-shot = {'id': sid, 'block': a.block, 'date': a.date, 'path': rel, 'tile': TILE, 'fmt': 'webp',
+# key id: the first 16 hex digits of the key's SHA-256, so the app can tell whether its key opens these tiles
+kid = hashlib.sha256(key).hexdigest()[:16]
+shot = {'id': sid, 'block': a.block, 'date': a.date, 'path': rel, 'tile': TILE, 'fmt': 'webp', 'kid': kid,
         'origin': [round(x0, 4), round(y0, 4)], 'levels': man_levels, 'bytes': total, 'tiles': count,
         'source_mpp': round(float(np.sqrt(abs(np.linalg.det(F[:2, :2])))), 4), 'fit': fit.get('quality', {})}
 idx_path = os.path.join(a.site, 'drone', 'index.json')

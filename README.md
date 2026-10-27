@@ -3,7 +3,7 @@
 Web app for recording Mounting Structure and PV Module installation status per table on an interactive keyplan.
 
 - **This repository holds the web page code and the drone photos in encrypted form.** Table IDs, keyplan geometry, statuses, users and companies are stored in the project's Supabase database and are shown only after login.
-- **Drone photos** (`drone/`) are cut into 512 px picture tiles aligned to the keyplan in metres (5 cm per pixel at the finest level) and encrypted with AES-256-GCM. `drone/index.json` lists the photos (block, date, tile grid). The key is kept in the database (update 11) and is given only to signed-in users, so the tiles cannot be viewed by visitors. `tools/drone/` holds the scripts that align a new photo to the keyplan and make its tiles (no keys or project data).
+- **Drone photos** (`drone/`) are cut into 512 px picture tiles aligned to the keyplan in metres (5 cm per pixel at the finest level) and encrypted with AES-256-GCM. `drone/index.json` lists the photos (block, date, tile grid, key id). The key is kept in the database (update 11) and is given only to signed-in users, so the tiles cannot be viewed by visitors; the app shows a photo only when its key id matches the key it received. `tools/drone/` holds the scripts that align a new photo to the keyplan and make its tiles (no keys or project data).
 - `config.js` contains the Supabase project URL and its public *publishable* key. That key is designed to be public: every read and write is checked inside the database and needs a valid login.
 - Hosted with GitHub Pages (Settings → Pages → Deploy from a branch → `main` / root).
 

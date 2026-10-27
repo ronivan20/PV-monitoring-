@@ -813,7 +813,8 @@ input[type="color"] { width: 52px; height: 38px; padding: 2px; }
 .kp.photo-on .bgline { stroke: rgba(255, 255, 255, .8); }
 .kp.photo-on .t .h { fill-opacity: var(--tint, .4); }
 .kp.photo-on :where(.t) .h { stroke: rgba(255, 255, 255, .92); } /* plain outlines only: state outlines keep their colours */
-.layer-ctl { position: absolute; top: 12px; left: 12px; z-index: 25; display: flex; flex-direction: column; align-items: flex-start; }
+.layer-ctl { position: absolute; top: 12px; left: 12px; z-index: 15; display: flex; flex-direction: column; align-items: flex-start; }
+.layer-ctl.open { z-index: 30; } /* below the phone's bottom sheet when closed, like the zoom buttons; its menu above it */
 .layer-btn {
   display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 11px 0 9px;
   border: 1px solid var(--ink); border-radius: var(--radius); background: var(--surface); color: var(--ink);

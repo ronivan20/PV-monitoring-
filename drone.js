@@ -3,15 +3,17 @@
    into 512 px picture tiles: drone/<photo>/r<n>/<level>/<col>_<row>.bin, listed in drone/index.json.
    The tiles sit on the public web site encrypted (AES-256-GCM, each tile bound to its own place).
    The key comes with the sign-in (get_bootstrap, database update 11), so only signed-in users can see
-   the photo. Tiles are decrypted in the browser, kept on the device once seen (or all at once with
-   "Save for use without signal") and drawn under the sections of both keyplans. */
+   the photo; index.json names each photo's key by the start of its SHA-256 ("kid"), so a photo the key
+   does not open is left out instead of drawn blank. Tiles are decrypted in the browser, kept on the
+   device once seen (or all at once with "Save for use without signal") and drawn under the sections of
+   both keyplans. */
 (function () {
   'use strict';
   var D = window.PVMDrone = {};
   var CACHE = 'pvm-drone-v1';
   var MEM_MIN = 160;               // decoded tiles kept in memory (about 1 MB each)
   var RETRY_MS = 20000;            // a tile that could not be loaded is tried again after this
-  var idx = null, key = null, keyB64 = null, keyGen = 0, listeners = [];
+  var idx = null, key = null, keyB64 = null, keyId = null, keyGen = 0, listeners = [];
   var mem = new Map(), failed = new Map(), useCounter = 0, memMax = MEM_MIN, idxLoading = null, idxText = null;
   function noop() { /* nothing */ }
 
@@ -27,18 +29,21 @@
   // Key (from the sign-in) and the list of photos
   // ------------------------------------------------------------------
   function bytes(s) { var b = atob(s), u = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+  function hex(buf) { return Array.prototype.map.call(new Uint8Array(buf), function (b) { return (b < 16 ? '0' : '') + b.toString(16); }).join(''); }
   D.setKey = function (k) {
     k = typeof k === 'string' && k ? k : null;
     if (k === keyB64) return;
     D.clear();
-    keyB64 = k; key = null;
+    keyB64 = k; key = null; keyId = null;
     var gen = ++keyGen;
     if (k && window.crypto && window.crypto.subtle) {
       var raw; try { raw = bytes(k); } catch (e) { raw = null; }
       if (raw && raw.length === 32) {
-        window.crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt']).then(function (ck) {
+        // the key id (start of its SHA-256) tells which photos this key opens (index.json "kid")
+        Promise.all([window.crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt']),
+                     window.crypto.subtle.digest('SHA-256', raw)]).then(function (r) {
           if (gen !== keyGen) return;
-          key = ck; changed();
+          key = r[0]; keyId = hex(r[1]).slice(0, 16); changed();
         }, function () { /* the photo stays off */ });
       }
     }
@@ -85,9 +90,12 @@
       });
     }).catch(noop);
   }
-  D.shots = function (block) {
-    return idx ? idx.shots.filter(function (s) { return s.block === block; }).sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; }) : [];
-  };
+  function newestFirst(a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; }
+  // every photo of a block, whatever key it needs
+  function allShots(block) { return idx ? idx.shots.filter(function (s) { return s.block === block; }).sort(newestFirst) : []; }
+  // the photos the key from the sign-in opens (a photo made with another key is left out, never shown as blank)
+  function opens(s) { return !!key && (!s.kid || s.kid === keyId); }
+  D.shots = function (block) { return allShots(block).filter(opens); };
   D.shot = function (block) {
     var list = D.shots(block); if (!list.length) return null;
     var want = prefs()['shot' + block];
@@ -129,12 +137,16 @@
       return fetch(url, { credentials: 'omit' }).then(function (res) { if (!res.ok) throw new Error('tile ' + res.status); return res.arrayBuffer(); });
     });
   }
-  function decode(blob, e) {
-    if (window.createImageBitmap) return window.createImageBitmap(blob);
+  function decodeImg(blob, e) {
     return new Promise(function (res, rej) {
       var im = new Image(); e.url = URL.createObjectURL(blob);
       im.onload = function () { res(im); }; im.onerror = rej; im.src = e.url;
     });
+  }
+  // createImageBitmap where it works; some older browsers have it but cannot read WebP with it
+  function decode(blob, e) {
+    if (!window.createImageBitmap) return decodeImg(blob, e);
+    return window.createImageBitmap(blob).catch(function () { return decodeImg(blob, e); });
   }
   function entry(shot, li, c, r, create) {
     var url = tileUrl(shot, li, c, r), e = mem.get(url);
@@ -284,6 +296,7 @@
   });
   function closePop(box) {
     if (box._pop) { box._pop.hidden = true; box._pop.textContent = ''; var b = box.querySelector('.layer-btn'); if (b) b.setAttribute('aria-expanded', 'false'); }
+    box.classList.remove('open');
     if (openBox === box) openBox = null;
   }
   function saveText(id) { var x = saving[id]; return x ? x.msg : ''; }
@@ -330,19 +343,25 @@
     if (!box) return;
     var h = P().h; if (!h) return;
     var wasOpen = !!(box._pop && !box._pop.hidden);
-    box.textContent = ''; box._pop = null;
+    box.textContent = ''; box._pop = null; box.classList.remove('open');
     if (openBox === box) openBox = null;
-    var list = D.shots(block), user = P().S && P().S.user;
+    var list = D.shots(block), user = P().S && P().S.user, admin = !!(user && user.role === 'admin');
     // the settings dialog of this block, if open, follows the change
     var dlg = document.getElementById('layer-dialog-' + block);
     if (dlg) { if (key && list.length) fill(dlg, block, true); else if (P().closeModal) P().closeModal(); }
-    if (!list.length) { box.hidden = true; return; }
+    if (!allShots(block).length) { box.hidden = true; return; }
+    function note(text) {
+      box.hidden = false;
+      box.appendChild(h('div', { class: 'layer-note', role: 'note', text: text }));
+    }
     if (!key) {
       // the administrator sees why the photo is missing until database update 11 is installed
-      if (user && user.role === 'admin' && !keyB64) {
-        box.hidden = false;
-        box.appendChild(h('div', { class: 'layer-note', role: 'note', text: 'Drone photo: needs database update 11' }));
-      } else box.hidden = true;
+      if (admin && !keyB64) note('Drone photo: needs database update 11'); else box.hidden = true;
+      return;
+    }
+    if (!list.length) {
+      // the photo was made with a newer key than the database has (run the latest update 11 file)
+      if (admin) note('Drone photo: run the latest database update 11'); else box.hidden = true;
       return;
     }
     box.hidden = false;
@@ -365,13 +384,13 @@
         var first = body.querySelector('button'); if (first) first.focus();
         return;
       }
-      btn.setAttribute('aria-expanded', 'true'); openBox = box;
+      btn.setAttribute('aria-expanded', 'true'); openBox = box; box.classList.add('open');
     }
     btn.addEventListener('click', function (e) {
       e.stopPropagation();
       if (pop.hidden) openPop(); else closePop(box);
     });
     box.appendChild(btn); box.appendChild(pop);
-    if (wasOpen) { fill(pop, block, false); pop.hidden = false; btn.setAttribute('aria-expanded', 'true'); openBox = box; }
+    if (wasOpen) { fill(pop, block, false); pop.hidden = false; btn.setAttribute('aria-expanded', 'true'); openBox = box; box.classList.add('open'); }
   };
 })();
