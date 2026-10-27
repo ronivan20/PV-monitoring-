@@ -15,7 +15,7 @@
     sync: function () { return Promise.resolve(); }, on: NOOP, count: function () { return 0; }, reviewCount: function () { return 0; }, render: NOOP,
     openPanel: NOOP, forgetCache: function () { return Promise.resolve(); }, statusText: function () { return ''; }
   };
-  var DB_VERSION = 10;
+  var DB_VERSION = 11;
   // the table screens also work on update 7, so the site can be published before update 8 is run;
   // the Piles page then asks for update 8
   var MIN_DB_VERSION = 7;
@@ -297,6 +297,7 @@
     S.selected = null; S.mode = 'details'; S.form = null; S.admin.users = null; S.admin.log = null;
     S.multi.clear(); S.multiFresh = false; S.pick = null; S.highlight = null;
     if (window.PVMPiles && window.PVMPiles.reset) window.PVMPiles.reset();
+    if (window.PVMDrone) window.PVMDrone.setKey(null);
   }
   function signedOut(message) {
     S.token = null; S.user = null; store.set(LS_TOKEN, null);
@@ -438,6 +439,7 @@
       KP.stale = true; // rebuild the keyplan with the new data; the zoom and position are kept
       if (!d.__savedAt) OFF.fresh();
       OFF.setUser(d.user, d.version);
+      if (window.PVMDrone) { window.PVMDrone.setKey(d.drone_key || null); window.PVMDrone.loadIndex(); } // update 11: drone photos
   }
   function loadComments() { return readRpc('get_comments', { p_token: S.token }).then(applyComments); }
   function applyComments(d) {
@@ -606,6 +608,7 @@
     el.append(KP.sel);
     KP.block = S.block; KP.stale = false;
     paintStatuses();
+    renderLayerCtl(); drawPhoto();
     var tok = KP.fitToken = {};
     requestAnimationFrame(function () {
       if (KP.fitToken !== tok) return;
@@ -676,7 +679,36 @@
     var ppu = r.width ? r.width / v.w : 1;
     KP.svg.classList.toggle('show-labels', ppu >= LABEL_PPU);
     drawSelMarker(ppu);
+    drawPhoto();
   }
+
+  // Drone photo under the keyplan (update 11): drawn on its own canvas below the drawing, in keyplan
+  // metres, so the sections sit on the tables of the photo. Everything else of the keyplan is unchanged.
+  var PH = { raf: 0 };
+  function drawPhoto() { if (!PH.raf) PH.raf = requestAnimationFrame(paintPhoto); }
+  function paintPhoto() {
+    PH.raf = 0;
+    var cv = $('#kp-photo'), D = window.PVMDrone, kp = S.kp[S.block];
+    if (!cv || !KP.svg) return;
+    var on = !!(D && kp && KP.block === S.block && D.isOn(S.block));
+    KP.svg.classList.toggle('photo-on', on);
+    var r = canvasRect();
+    if (!on || !r.width || !r.height || $('#view-keyplan').hidden) {
+      if (!on && cv.width) { cv.width = 0; cv.height = 0; }
+      cv.hidden = !on;
+      return;
+    }
+    KP.svg.style.setProperty('--tint', String(D.tint()));
+    cv.hidden = false;
+    var dpr = Math.min(3, window.devicePixelRatio || 1), W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
+    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+    var ctx = cv.getContext('2d'), v = KP.view, k = r.width / v.w * dpr;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#ffffff'; // the drawing sheet, where the photo has nothing
+    ctx.fillRect(Math.round(-v.x * k), Math.round(-v.y * k), Math.round(+kp.width * k), Math.round(+kp.height * k));
+    D.draw(ctx, S.block, v, r.width, r.height, dpr, drawPhoto);
+  }
+  function renderLayerCtl() { if (window.PVMDrone) window.PVMDrone.control($('#layer-ctl'), S.block); }
   function zoomLimits() {
     var kp = S.kp[S.block]; var r = canvasRect(); var aspect = r.width / Math.max(1, r.height);
     return { min: 10, max: Math.max(+kp.width, +kp.height * aspect) * 2.5 };
@@ -3364,6 +3396,7 @@
       })),
       h('p', { class: 'small', text: 'Subcontractors can update only the sections and the activity assigned to their company: a Mounting Structure assignment does not allow PV Module updates, and the other way round. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
       h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' }),
+      h('p', { class: 'small', text: 'Drone photo: Block 1 shows the latest drone photo under the sections, at true size. The date button at the top left of the keyplan switches between the photo and the drawing, picks an older photo date and sets how strong the status colours are. Save for use without signal keeps the whole photo on this device.' }),
       h('p', { class: 'small', text: 'Install the app: tap your name at the top right, then Install the app on this device. It then opens from its own icon, full screen.' }),
       h('p', { class: 'small', text: 'No signal? Keep working. The keyplan shows what this phone saved last, and updates you save are kept on the phone (dashed blue outline, "Waiting to send") and sent automatically when the signal is back. If someone else changed the same section meanwhile, the app asks you whether to keep your update.' })]);
   }
@@ -3478,6 +3511,10 @@
     window.addEventListener('online', function () { if (S.user) poll(true); });
     wireCanvas();
     wireSearch();
+    if (window.PVMDrone) window.PVMDrone.on(function (kind) {
+      if (kind !== 'tint') renderLayerCtl();
+      drawPhoto();
+    });
   }
 
   // shared with the Piles module (piles.js, update 8)

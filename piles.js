@@ -310,6 +310,12 @@
     render();
   };
   Pi.hide = function () { PS.visible = false; };
+  // drone photo under the pile keyplan (update 11): same photo, same background button
+  function renderLayerCtl() { if (window.PVMDrone) window.PVMDrone.control($('#player-ctl'), PS.block); }
+  if (window.PVMDrone) window.PVMDrone.on(function (kind) {
+    if (kind !== 'tint') renderLayerCtl();
+    drawKP();
+  });
   Pi.reset = function () {
     PS.loaded = false; PS.loading = null; PS.piles = []; PS.byId = new Map(); PS.byBlock = { 1: [], 5: [] };
     PS.cur = new Map(); PS.asg = new Map(); PS.insp = new Map(); PS.cases = new Map(); PS.files = new Map();
@@ -334,7 +340,7 @@
     if (PS.sub === 'keyplan') {
       renderToolbar(); renderFilters();
       if (PK.block !== PS.block || PK.stale) buildKeyplan();
-      renderLegend(); renderPanel(); drawKP();
+      renderLegend(); renderPanel(); renderLayerCtl(); drawKP();
       requestAnimationFrame(onResize);
     } else if (PS.sub === 'dashboard') { if (Pi.renderDashboard) Pi.renderDashboard(resetScroll); }
     else if (Pi.renderSetup) Pi.renderSetup(resetScroll);
@@ -453,10 +459,13 @@
     if (PK.secRef !== S.sections) { PK.secRef = S.sections; tableBoxes(); }
     var kp = kpOf(PS.block);
     ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, +kp.width, +kp.height);
+    // drone photo under the drawing (update 11), at true size in keyplan metres
+    var DR = window.PVMDrone, photo = !!(DR && S.kp[PS.block] && DR.draw(ctx, PS.block, v, r.width, r.height, dpr, drawKP));
+    var tint = photo ? DR.tint() : 1;
     ctx.lineWidth = px; ctx.strokeStyle = '#b9c2cb'; ctx.strokeRect(0, 0, +kp.width, +kp.height);
     ctx.beginPath();
     (kp.lines || []).forEach(function (l) { ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); });
-    ctx.lineWidth = 1.2 * px; ctx.strokeStyle = '#8d98a4'; ctx.stroke();
+    ctx.lineWidth = 1.2 * px; ctx.strokeStyle = photo ? 'rgba(255,255,255,.8)' : '#8d98a4'; ctx.stroke();
     // table sections as faint context
     var x0 = v.x, y0 = v.y, x1 = v.x + v.w, y1 = v.y + v.h;
     ctx.beginPath();
@@ -464,14 +473,17 @@
       var g = s.geom; if (g[0] > x1 || g[1] > y1 || g[0] + g[2] < x0 || g[1] + g[3] < y0) return;
       ctx.rect(g[0], g[1], g[2], g[3]);
     });
-    ctx.fillStyle = '#f2f4f7'; ctx.fill(); ctx.lineWidth = 0.8 * px; ctx.strokeStyle = '#aab4be'; ctx.stroke();
+    if (photo) { ctx.lineWidth = 0.8 * px; ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.stroke(); }
+    else { ctx.fillStyle = '#f2f4f7'; ctx.fill(); ctx.lineWidth = 0.8 * px; ctx.strokeStyle = '#aab4be'; ctx.stroke(); }
     if (ppu >= 6) {
       ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.font = '600 11px ' + getComputedStyle(document.body).fontFamily; ctx.fillStyle = '#8a96a2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = '600 11px ' + getComputedStyle(document.body).fontFamily; ctx.fillStyle = photo ? '#15212c' : '#8a96a2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (photo) { ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 3; ctx.lineJoin = 'round'; }
       S.tables.forEach(function (t) {
         if (t.block !== PS.block || !t.code || !t._pbb) return;
         var cx = (t._pbb[0] + t._pbb[2]) / 2, cy = t._pbb[1] - 1.2;
         if (cx < x0 || cx > x1 || cy < y0 || cy > y1) return;
+        if (photo) ctx.strokeText(t.code, (cx - v.x) * ppu, (cy - v.y) * ppu);
         ctx.fillText(t.code, (cx - v.x) * ppu, (cy - v.y) * ppu);
       });
       ctx.restore();
@@ -488,10 +500,10 @@
       ctx.globalAlpha = 0.22; rects(G.dim, 0); ctx.fillStyle = '#9aa5b0'; ctx.fill(); ctx.globalAlpha = 1;
     }
     G.byColor.forEach(function (list, col) {
-      rects(list, 0); ctx.fillStyle = col; ctx.fill();
-      ctx.lineWidth = px; ctx.strokeStyle = 'rgba(21,33,44,.55)'; ctx.stroke();
+      rects(list, 0); ctx.fillStyle = col; ctx.globalAlpha = tint; ctx.fill(); ctx.globalAlpha = 1;
+      ctx.lineWidth = px; ctx.strokeStyle = photo ? 'rgba(255,255,255,.9)' : 'rgba(21,33,44,.55)'; ctx.stroke();
     });
-    if (G.off.length) { rects(G.off, 0); ctx.fillStyle = '#ffffff'; ctx.fill(); ctx.lineWidth = 1.2 * px; ctx.strokeStyle = '#7a8692'; ctx.stroke(); }
+    if (G.off.length) { rects(G.off, 0); ctx.fillStyle = '#ffffff'; ctx.globalAlpha = tint; ctx.fill(); ctx.globalAlpha = 1; ctx.lineWidth = 1.2 * px; ctx.strokeStyle = '#7a8692'; ctx.stroke(); }
     // open refusal / rectification cases: red outline
     rects((PS.byBlock[PS.block] || []).filter(function (p) { return openCases(p).length; }), 1.6 * px);
     ctx.lineWidth = 2.4 * px; ctx.strokeStyle = '#c0262d'; ctx.stroke();
@@ -1606,7 +1618,8 @@
         h('li', { text: 'Press Update status, choose the new status, add remarks, review and confirm. For many sections use Update several sections: tap sections, draw a box or Select all shown, then review and confirm.' }),
         h('li', { text: 'A red ring marks a section with an open refusal or rectification case. White sections with a grey outline are out of scope.' })),
       h('p', { class: 'small', text: 'Contractors can update only the sections assigned to their company and cannot set Accepted / Verified. Only the administrator or the authorised inspector records inspection and acceptance; a Completed section stays Completed until then.' }),
-      h('p', { class: 'small', text: 'Every save records your username, the server time, the previous and new status and the contractor. Section counts are separate from the Mounting Structure and PV Module table counts.' })]);
+      h('p', { class: 'small', text: 'Every save records your username, the server time, the previous and new status and the contractor. Section counts are separate from the Mounting Structure and PV Module table counts.' }),
+      h('p', { class: 'small', text: 'Block 1 shows the drone photo under the sections, at true size, so installed piles can be checked against the photo. The date button at the top left switches between the photo and the drawing, picks the photo date and sets how strong the colours are.' })]);
   }
 
   // ------------------------------------------------------------------

@@ -3,12 +3,12 @@
    data it downloaded, and updates saved without signal, in the phone's storage (offline.js).
    Requests to the database are never answered from here. */
 'use strict';
-var VERSION = '202610251430';
+var VERSION = '202610271410';
 // this worker looks after the files directly in the app's folder only; other apps in subfolders of
 // the same site (for example serial-numbers/) have their own worker and are left alone
 var BASE = new URL('./', self.location.href).pathname;
 var CACHE = 'pvm-shell-' + VERSION;
-var SHELL = ['./', 'styles.css?v=' + VERSION, 'config.js?v=' + VERSION, 'offline.js?v=' + VERSION, 'install.js?v=' + VERSION,
+var SHELL = ['./', 'styles.css?v=' + VERSION, 'config.js?v=' + VERSION, 'offline.js?v=' + VERSION, 'install.js?v=' + VERSION, 'drone.js?v=' + VERSION,
   'app.js?v=' + VERSION, 'piles.js?v=' + VERSION, 'piles-pages.js?v=' + VERSION, 'qrcode.js?v=' + VERSION, 'favicon.svg',
   'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
