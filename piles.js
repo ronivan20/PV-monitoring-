@@ -1619,7 +1619,7 @@
         h('li', { text: 'A red ring marks a section with an open refusal or rectification case. White sections with a grey outline are out of scope.' })),
       h('p', { class: 'small', text: 'Contractors can update only the sections assigned to their company and cannot set Accepted / Verified. Only the administrator or the authorised inspector records inspection and acceptance; a Completed section stays Completed until then.' }),
       h('p', { class: 'small', text: 'Every save records your username, the server time, the previous and new status and the contractor. Section counts are separate from the Mounting Structure and PV Module table counts.' }),
-      h('p', { class: 'small', text: 'Block 1 shows the drone photo under the sections, at true size, so installed piles can be checked against the photo. The date button at the top left switches between the photo and the drawing, picks the photo date and sets how strong the colours are.' })]);
+      h('p', { class: 'small', text: 'Block 1 and Block 5 show the drone photo under the sections, at true size, so installed piles can be checked against the photo. The date button at the top left switches between the photo and the drawing, picks the photo date and sets how strong the colours are.' })]);
   }
 
   // ------------------------------------------------------------------

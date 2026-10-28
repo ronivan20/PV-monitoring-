@@ -8,7 +8,7 @@ signed-in users receive the key (database update 11), so only they can see the p
 usage:
   python3 -I make_tiles.py --src photo.png --fit fit.json --kp kp1.json --block 1 --date 2026-10-26 \
       --key secrets/drone_key.b64 --site <site folder> [--margin 100] [--quality 80]
-writes <site>/drone/<id>/r<rev>/<level>/<col>_<row>.bin and updates <site>/drone/index.json
+writes <site>/drone/<id>/r<rev>/<level>/<col>_<row>.bin and updates <site>/drone/photos.json
 """
 import argparse, base64, hashlib, io, json, math, os, time
 import numpy as np, cv2
@@ -31,6 +31,8 @@ ap.add_argument('--quality', type=int, default=80)
 ap.add_argument('--rev', type=int, default=1, help='version of this photo\'s tiles; raise it when the same photo is made again')
 ap.add_argument('--interp', choices=['linear', 'cubic', 'lanczos'], default='lanczos',
                 help='resampling of the photo into keyplan metres (lanczos keeps the most detail)')
+ap.add_argument('--update', type=int, help='database update that brings the keyplan this photo is placed on (shown to the '
+                'administrator while the database still has the older keyplan)')
 a = ap.parse_args()
 
 t0 = time.time()
@@ -142,11 +144,18 @@ for li, (mpp, img) in enumerate(levels):
 
 # key id: the first 16 hex digits of the key's SHA-256, so the app can tell whether its key opens these tiles
 kid = hashlib.sha256(key).hexdigest()[:16]
+# kp: the keyplan sheet (width, height in metres) the photo is placed on; the app shows the photo only while the
+# block's keyplan in the database has this size, so a photo made for a newer drawing waits for its database update
 shot = {'id': sid, 'block': a.block, 'date': a.date, 'path': rel, 'tile': TILE, 'fmt': 'webp', 'kid': kid,
-        'origin': [round(x0, 4), round(y0, 4)], 'levels': man_levels, 'bytes': total, 'tiles': count,
+        'kp': [round(KW, 2), round(KH, 2)], 'origin': [round(x0, 4), round(y0, 4)], 'levels': man_levels, 'bytes': total, 'tiles': count,
         'source_mpp': round(float(np.sqrt(abs(np.linalg.det(F[:2, :2])))), 4), 'fit': fit.get('quality', {})}
-idx_path = os.path.join(a.site, 'drone', 'index.json')
-idx = json.load(open(idx_path)) if os.path.exists(idx_path) else {'v': 1, 'shots': []}
+if a.update:
+    shot['update'] = a.update
+# drone/photos.json: the list the app reads (from update 12). drone/index.json is the older list, left as it is for
+# app copies that have not reloaded yet (they cannot check the keyplan sheet of a photo).
+idx_path = os.path.join(a.site, 'drone', 'photos.json')
+old_path = os.path.join(a.site, 'drone', 'index.json')
+idx = json.load(open(idx_path if os.path.exists(idx_path) else old_path)) if (os.path.exists(idx_path) or os.path.exists(old_path)) else {'v': 1, 'shots': []}
 idx['shots'] = [s for s in idx['shots'] if s['id'] != sid] + [shot]
 idx['shots'].sort(key=lambda s: (s['block'], s['date']))
 json.dump(idx, open(idx_path, 'w'), separators=(',', ':'))

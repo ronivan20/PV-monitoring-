@@ -15,7 +15,7 @@
     sync: function () { return Promise.resolve(); }, on: NOOP, count: function () { return 0; }, reviewCount: function () { return 0; }, render: NOOP,
     openPanel: NOOP, forgetCache: function () { return Promise.resolve(); }, statusText: function () { return ''; }
   };
-  var DB_VERSION = 11;
+  var DB_VERSION = 12;
   // the table screens also work on update 7, so the site can be published before update 8 is run;
   // the Piles page then asks for update 8
   var MIN_DB_VERSION = 7;
@@ -39,14 +39,19 @@
     duplicate_label: 'Drawn twice in DWG',
     half_outline: 'Only one half drawn',
     split_unresolved: 'West/East not confirmed',
-    from_photo: 'Added from drone photo'
+    from_photo: 'Added from drone photo',
+    moved_photo: 'Placed as built (drone photo)'
   };
-  // where a table's outline comes from: DWG object handles, or (update 11) "photo:<photo id>:<ID>" for a
-  // table seen installed on a drone photo but not drawn in the DWG
+  // where a table's outline comes from: DWG object handles, (update 11) "photo:<photo id>:<ID>" for a table seen
+  // installed on a drone photo but not drawn in the DWG, or (update 12) "b5web:<handles>" in the new Block 5 drawing
+  var DWG_FILES = { b5web: 'BLOCK 5 KEYPLAN FOR WEB APP.dwg' };
   function dwgSource(ref, plural) {
-    var m = /^photo:b\d+-(\d{4})(\d{2})(\d{2}):/.exec(String(ref || ''));
+    ref = String(ref || '');
+    var m = /^photo:b\d+-(\d{4})(\d{2})(\d{2}):/.exec(ref);
     if (m) return 'Not in the DWG: added from the drone photo of ' + new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
-    return (plural ? 'DWG object handles ' : 'DWG object handle ') + String(ref || '').replace(/\+/g, ' + ');
+    var f = /^([a-z0-9]+):(.+)$/.exec(ref);
+    if (f && DWG_FILES[f[1]]) return (plural ? 'Object handles ' : 'Object handle ') + f[2].replace(/\+/g, ' + ') + ' in ' + DWG_FILES[f[1]];
+    return (plural ? 'DWG object handles ' : 'DWG object handle ') + ref.replace(/\+/g, ' + ');
   }
   // contractor colours (the database sends the same list; kept clear of the status colours)
   var PALETTE = ['#2563eb', '#92400e', '#0f766e', '#38bdf8', '#1e293b', '#86198f', '#a78bfa', '#7c3aed', '#0891b2', '#1e3a8a', '#c026d3'];
@@ -1337,8 +1342,9 @@
     var p = parentOf(s), out = [];
     if (!s.code) {
       if (p && !p.code) out.push(h('div', { class: 'notice err' }, h('strong', { text: 'No table ID in the drawing' }),
-        'This table has no ID in the DWG or the PDF keyplan, so its sections are not counted and cannot be updated. ' +
-        (isAdmin() ? 'Use Edit table info to assign its ID.' : 'Ask the administrator to assign its ID.')));
+        'This table has no ID in the drawing, so its sections are not counted and cannot be updated yet. ' +
+        (isAdmin() ? 'Use Edit table info to assign its ID.' : 'Ask the administrator to assign its ID.'),
+        p.flag_notes ? h('div', { class: 'small', text: p.flag_notes }) : null));
       else out.push(h('div', { class: 'notice err' }, h('strong', { text: 'West/East not confirmed' }), s.flag_notes || '',
         isAdmin() ? h('div', { class: 'small', text: 'Use Edit section to set W or E once confirmed.' }) : null));
       return out;
@@ -3287,7 +3293,7 @@
     var toggle = h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: A.reviewAll, onchange: function (e) { A.reviewAll = e.target.checked; renderAdmin(); } }),
       h('span', { text: 'Also show items already marked as checked' }));
     var card = h('div', { class: 'card' }, h('h2', { text: 'Drawing items to review' }),
-      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and splitting each table into West and East sections, plus tables seen installed on a drone photo but not drawn in the DWG (added on request). Nothing was guessed: sections without an ID stay out of all counts until you resolve them.' }),
+      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and, for Block 5, “BLOCK 5 KEYPLAN FOR WEB APP.dwg” (database update 12), and splitting each table into West and East sections, plus tables seen on a drone photo but not drawn in the DWG, or drawn in another place (added or placed as built, on request). Nothing was guessed: tables the drawing gives no ID wait here for their ID (Edit), and sections without an ID stay out of all counts until you resolve them.' }),
       toggle);
     if (!list.length) card.append(h('div', { class: 'empty-state', text: 'Nothing open for review.' }));
     else card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
@@ -3404,7 +3410,7 @@
       })),
       h('p', { class: 'small', text: 'Subcontractors can update only the sections and the activity assigned to their company: a Mounting Structure assignment does not allow PV Module updates, and the other way round. Use the My scope button to fade everything else. West and East are tracked separately: completing one does not change the other.' }),
       h('p', { class: 'small', text: 'Every save records your username, the contractor and the server date and time. Earlier statuses stay in the history, also when a section is reassigned.' }),
-      h('p', { class: 'small', text: 'Drone photo: Block 1 shows the latest drone photo under the sections, at true size. The date button at the top left of the keyplan switches between the photo and the drawing, picks an older photo date and sets how strong the status colours are. Save for use without signal keeps the whole photo on this device.' }),
+      h('p', { class: 'small', text: 'Drone photo: Block 1 and Block 5 show the latest drone photo under the sections, at true size. The date button at the top left of the keyplan switches between the photo and the drawing, picks an older photo date and sets how strong the status colours are. Save for use without signal keeps the whole photo on this device.' }),
       h('p', { class: 'small', text: 'Install the app: tap your name at the top right, then Install the app on this device. It then opens from its own icon, full screen.' }),
       h('p', { class: 'small', text: 'No signal? Keep working. The keyplan shows what this phone saved last, and updates you save are kept on the phone (dashed blue outline, "Waiting to send") and sent automatically when the signal is back. If someone else changed the same section meanwhile, the app asks you whether to keep your update.' })]);
   }

@@ -3,7 +3,7 @@
    data it downloaded, and updates saved without signal, in the phone's storage (offline.js).
    Requests to the database are never answered from here. */
 'use strict';
-var VERSION = '202610280644';
+var VERSION = '202610281807';
 // this worker looks after the files directly in the app's folder only; other apps in subfolders of
 // the same site (for example serial-numbers/) have their own worker and are left alone
 var BASE = new URL('./', self.location.href).pathname;

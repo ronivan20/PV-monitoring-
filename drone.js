@@ -1,9 +1,9 @@
-/* Solar PV Installation Monitoring — drone photo under the keyplans (update 11).
+/* Solar PV Installation Monitoring — drone photo under the keyplans (update 11; Block 5 from update 12).
    A drone photo is resampled to keyplan metres (true size, 5 cm per pixel at the finest level) and cut
-   into 512 px picture tiles: drone/<photo>/r<n>/<level>/<col>_<row>.bin, listed in drone/index.json.
+   into 512 px picture tiles: drone/<photo>/r<n>/<level>/<col>_<row>.bin, listed in drone/photos.json.
    The tiles sit on the public web site encrypted (AES-256-GCM, each tile bound to its own place).
    The key comes with the sign-in (get_bootstrap, database update 11), so only signed-in users can see
-   the photo; index.json names each photo's key by the start of its SHA-256 ("kid"), so a photo the key
+   the photo; photos.json names each photo's key by the start of its SHA-256 ("kid"), so a photo the key
    does not open is left out instead of drawn blank. Tiles are decrypted in the browser, kept on the
    device once seen (or all at once with "Save for use without signal") and drawn under the sections of
    both keyplans. */
@@ -55,10 +55,14 @@
   D.hasKey = function () { return !!key; };
   D.keyGiven = function () { return !!keyB64; };
   function cacheOpen() { return window.caches ? window.caches.open(CACHE) : Promise.reject(new Error('no cache storage')); }
-  // the list of photos (public, small); refreshed with every data load, so new photos appear without a reload
+  // the list of photos (public, small); refreshed with every data load, so new photos appear without a reload.
+  // drone/photos.json is the list this version reads (it checks each photo's keyplan sheet, update 12);
+  // drone/index.json is the older list (Block 1 only), kept for app copies that have not reloaded yet: they cannot
+  // check the sheet, so they must not see a photo made for a newer drawing.
+  var OLD_LIST = baseUrl('drone/index.json');
   D.loadIndex = function () {
     if (idxLoading) return idxLoading;
-    var url = baseUrl('drone/index.json');
+    var url = baseUrl('drone/photos.json');
     var ctl = window.AbortController ? new AbortController() : null;
     var timer = ctl ? setTimeout(function () { ctl.abort(); }, 10000) : null;
     idxLoading = fetch(url, { cache: 'no-cache', credentials: 'omit', signal: ctl ? ctl.signal : undefined }).then(function (res) {
@@ -69,7 +73,9 @@
       return res.text();
     }).catch(function () {
       clearTimeout(timer);
-      return cacheOpen().then(function (c) { return c.match(url); }).then(function (r) { return r ? r.text() : null; }).catch(function () { return null; });
+      // no signal: the list kept on this device (the older list if this version has not loaded its own yet)
+      return cacheOpen().then(function (c) { return c.match(url).then(function (r) { return r || c.match(OLD_LIST); }); })
+        .then(function (r) { return r ? r.text() : null; }).catch(function () { return null; });
     }).then(function (txt) {
       idxLoading = null;
       if (!txt || txt === idxText) return idx;
@@ -95,7 +101,16 @@
   function allShots(block) { return idx ? idx.shots.filter(function (s) { return s.block === block; }).sort(newestFirst) : []; }
   // the photos the key from the sign-in opens (a photo made with another key is left out, never shown as blank)
   function opens(s) { return !!key && (!s.kid || s.kid === keyId); }
-  D.shots = function (block) { return allShots(block).filter(opens); };
+  // a photo is placed on one keyplan sheet (index.json "kp": its width and height in metres). If the block's keyplan
+  // in the database is another drawing (a database update not run yet), the photo would not sit on the tables, so it
+  // is left out until the keyplan matches (update 12: the new Block 5 drawing).
+  function sheetOf(block) { var p = P(); return p.S && p.S.kp ? p.S.kp[block] : null; }
+  function fits(s) {
+    if (!s.kp) return true;
+    var k = sheetOf(s.block);
+    return !!k && Math.abs(+k.width - s.kp[0]) < 0.05 && Math.abs(+k.height - s.kp[1]) < 0.05;
+  }
+  D.shots = function (block) { return allShots(block).filter(function (s) { return opens(s) && fits(s); }); };
   D.shot = function (block) {
     var list = D.shots(block); if (!list.length) return null;
     var want = prefs()['shot' + block];
@@ -360,8 +375,11 @@
       return;
     }
     if (!list.length) {
-      // the photo was made with a newer key than the database has (run the latest update 11 file)
-      if (admin) note('Drone photo: run the latest database update 11'); else box.hidden = true;
+      // the photo is made for a newer keyplan than the database has (update 12 for Block 5), or with a newer key
+      // than the database has (the latest update 11 file)
+      var later = allShots(block).filter(function (s) { return opens(s) && !fits(s); })[0];
+      if (admin) note(later ? 'Drone photo: run database update ' + (later.update || 12) + ' (new keyplan)' : 'Drone photo: run the latest database update 11');
+      else box.hidden = true;
       return;
     }
     box.hidden = false;

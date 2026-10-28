@@ -5,8 +5,11 @@ Two ways, as the situation allows:
   --kp KP.json      The first photo of a block. Installed PV modules are found in the photo (dark blue-grey,
                     closed into table shapes) and matched to the keyplan sections: FFT search over scale and
                     rotation, then overlap (IoU) refinement as a similarity and an affine transform.
-                    KP.json = {"kp": {"width", "height"}, "secs": [{"id", "geom": [x, y, w, h]}, ...]}
+                    KP.json = {"kp": {"width", "height"}, "secs": [{"id", "geom": [x, y, w, h], "inst": true?}, ...]}
                     (the block's keyplan and sections from the database; not stored in the public repository).
+                    "inst": the drawing marks this section as installed (Block 5: red hatch = PV modules). When
+                    given, the photo's modules are matched to those sections only: rows of similar tables can
+                    otherwise also fit one column off.
 
   --ref SITE --ref-shot ID --key KEY
                     A later photo of a block that already has one: matched to the published (encrypted) photo
@@ -53,6 +56,7 @@ kp = secs = None
 if a.kp:
     d = json.load(open(a.kp)); kp = d['kp']; secs = d['secs']
     KW, KH = float(kp['width']), float(kp['height'])
+    MARKED = set(s['id'] for s in secs if s.get('inst')) or None     # sections the drawing shows installed
 
 def module_mask(q):
     """installed PV modules at quarter size: dark, blue-grey; closed over the white cell lines into tables"""
@@ -85,7 +89,7 @@ def coarse_search(M, mpp_q, rots, R):
     """M: module mask at some reduction; mpp_q: metres per mask pixel to try; rots: degrees to try; R: metres per
     keyplan raster pixel. FFT cross-correlation of the mask with the sections (+1 inside, -1 outside)."""
     PAD = int(80 / R)
-    K = np.where(sections_raster(R, PAD) > 0, 1.0, -1.0).astype(np.float32)
+    K = np.where(sections_raster(R, PAD, MARKED) > 0, 1.0, -1.0).astype(np.float32)
     hm, wm = M.shape
     t = np.radians(max(abs(r) for r in rots)); f = max(mpp_q) / R
     big = (int((hm * np.cos(t) + wm * np.sin(t)) * f) + 4, int((wm * np.cos(t) + hm * np.sin(t)) * f) + 4)
@@ -129,7 +133,7 @@ def iou_refine(M4, F, inst=None):
     def warp(Fm):
         A = np.array([[1 / R, 0, -0.5], [0, 1 / R, -0.5], [0, 0, 1]]) @ Fm @ Q4
         return cv2.warpAffine(M4, A[:2], (Wk, Hk), flags=cv2.INTER_LINEAR)
-    if inst is None: inst = installed(M4, F)
+    if inst is None: inst = MARKED or installed(M4, F)
     T = cv2.GaussianBlur(sections_raster(R, 0, inst)[:Hk, :Wk], (0, 0), 1.0)
     def cost(Fm):
         Mw = warp(Fm); i = float((Mw * T).sum()); return 1 - i / float(Mw.sum() + T.sum() - i)
