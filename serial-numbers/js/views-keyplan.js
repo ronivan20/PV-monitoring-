@@ -52,18 +52,24 @@
       filterBtn, selBtn);
     var filters = el('div.kp-filters.card#kp-filters', { hidden: true });
     var legend = el('div.kp-legend#kp-legend', { role: 'group', 'aria-label': 'Table status legend. Select a status to show only those tables.' });
-    var zoom = el('div.kp-zoom',
+    var photoBtn = el('button.icon-btn#kp-photo-btn', { type: 'button', hidden: true, on: { click: function () { SN.drone.setOn(!SN.drone.on); } } }, u.icon('image', 20));
+    var zoom = el('div.kp-zoom', photoBtn,
       el('button.icon-btn', { type: 'button', 'aria-label': 'Zoom in', on: { click: function () { K.kp.zoom(1.6); } } }, u.icon('plus', 20)),
       el('button.icon-btn', { type: 'button', 'aria-label': 'Zoom out', on: { click: function () { K.kp.zoom(1 / 1.6); } } }, u.icon('minus', 20)),
       el('button.icon-btn', { type: 'button', 'aria-label': 'Show the whole farm', on: { click: function () { K.kp.fit(true); } } }, u.icon('fit', 20)));
     var tip = el('div.kp-tip#kp-tip', { hidden: true, role: 'tooltip' });
     var selbar = el('div.kp-selbar.card#kp-selbar', { hidden: true });
     var panel = el('aside.panel#table-panel', { hidden: true, 'aria-label': 'Table details' });
-    view.appendChild(canvas); view.appendChild(top); view.appendChild(filters); view.appendChild(legend);
+    var photoNote = el('div.kp-photo-note#kp-photo-note', { hidden: true });
+    view.appendChild(canvas); view.appendChild(top); view.appendChild(filters); view.appendChild(legend); view.appendChild(photoNote);
     view.appendChild(zoom); view.appendChild(tip); view.appendChild(selbar); view.appendChild(panel);
 
     var L = S.settings.layout || { table_w: 16.808, table_h: 5.272 };
+    SN.drone.setManifest(S.settings.drone);
     K.kp = SN.Keyplan(canvas, {
+      underlay: function (ctx, v, w, h, dpr) { return SN.drone.draw(ctx, v, w, h, dpr); },
+      fillAlpha: function () { return SN.drone.alpha; },
+      extraBounds: function () { return SN.drone.visible() ? SN.drone.extent() : null; },
       tw: +L.table_w || 16.808, th: +L.table_h || 5.272,
       background: function () { return document.documentElement.classList.contains('dark') ? '#0f171e' : '#eef2f5'; },
       colorFor: function (t) { return SN.COLORS[SN.tableState(t)] || '#cccccc'; },
@@ -117,6 +123,8 @@
       onView: function (v) { try { sessionStorage.setItem('pvsn.view', JSON.stringify(v)); } catch (e) { /* ignore */ } }
     });
     K.kp.setTables(S.list);
+    SN.drone.onLoad = function () { K.kp.invalidate(); };
+    renderPhoto();
     var saved = null;
     try { saved = JSON.parse(sessionStorage.getItem('pvsn.view')); } catch (e) { saved = null; }
     setTimeout(function () { if (saved) K.kp.setView(saved); else K.kp.fit(false); }, 0);
@@ -181,7 +189,9 @@
         if (stale) loadDetail(K.table.id, true); else renderPanel();
       }
     });
-    SN.bus.on('settings', function () { if (K.built) renderPanel(); });
+    SN.bus.on('settings', function () { if (K.built) { renderPanel(); renderPhoto(); if (!u.$('#kp-filters').hidden) renderFilters(); } });
+    SN.bus.on('drone', function () { if (K.built) { renderPhoto(); if (!u.$('#kp-filters').hidden) renderFilters(); } });
+    SN.bus.on('drone-device', function () { if (K.built && !keep.running && !u.$('#kp-filters').hidden) renderFilters(); });
     SN.bus.on('detail-stale', function (tid) { if (K.built && K.table && K.table.id === tid) loadDetail(tid, true); });
     SN.bus.on('outbox-list', function (items) {
       K.queued = new Map();
@@ -279,9 +289,68 @@
     if (S.me.role === 'encoder' || S.list.some(function (t) { return t.assigned_to === S.me.id; })) tog('mine', 'Only tables assigned to me');
     tog('issues', 'Show drawing issues', 'Outlines without ID, duplicate IDs and IDs drawn without a table (dashed)');
     f.appendChild(toggles);
+    if (SN.drone.available()) f.appendChild(photoGroup());
     f.appendChild(el('div.row.end', el('button.btn.small', { type: 'button', on: { click: function () {
       F.block = ''; F.states.clear(); F.mine = false; F.issues = false; renderFilters(); renderLegend(); K.kp.invalidate();
     } } }, 'Clear filters'), el('button.btn.small.primary', { type: 'button', on: { click: function () { f.hidden = true; u.$('#kp-filter-btn').setAttribute('aria-expanded', 'false'); } } }, 'Done')));
+  }
+
+  // ---------- drone photo under the keyplan ----------
+  function photoTitle() {
+    var m = SN.drone.man;
+    if (!m) return '';
+    var d = m.date ? new Date(m.date + 'T12:00:00+08:00') : null;
+    return 'Drone photo' + (d && !isNaN(d) ? ' · ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Manila' }) : '');
+  }
+  function renderPhoto() {
+    var b = u.$('#kp-photo-btn'), n = u.$('#kp-photo-note');
+    if (!b) return;
+    var av = SN.drone.available(), on = SN.drone.visible();
+    b.hidden = !av;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+    b.setAttribute('aria-label', on ? 'Hide the drone photo' : 'Show the drone photo');
+    b.title = av ? (on ? 'Hide ' : 'Show ') + photoTitle() : '';
+    n.hidden = !on;
+    if (on) { u.clear(n); n.appendChild(u.icon('image', 14)); n.appendChild(el('span', photoTitle())); }
+    if (K.kp) K.kp.invalidate();
+  }
+  var keep = { running: false, stop: false };
+  function photoGroup() {
+    var D = SN.drone, g = el('div.fgroup');
+    g.appendChild(el('div.flabel', photoTitle()));
+    var cb = el('input', { type: 'checkbox', id: 'f-photo', checked: D.on });
+    cb.addEventListener('change', function () { D.setOn(cb.checked); });
+    g.appendChild(el('label.check', { for: 'f-photo' }, cb, el('span', 'Show the drone photo under the tables',
+      el('small.muted', 'Same scale as the keyplan: zoom in to see each table and module row. Tables not in the layout appear in the photo only.'))));
+    var rng = el('input', { type: 'range', min: 10, max: 100, step: 5, value: Math.round(D.alpha * 100), 'aria-label': 'Strength of the table colours on the photo' });
+    var val = el('span.small.muted', Math.round(D.alpha * 100) + '%');
+    rng.addEventListener('input', function () { D.setAlpha(rng.value / 100); val.textContent = rng.value + '%'; });
+    g.appendChild(el('label.field.range', el('span', 'Table colours on the photo'), el('div.row', rng, val)));
+    var st = el('span.small.muted', 'Checking this phone…');
+    var btn = el('button.btn.small', { type: 'button' }, u.icon('download'), el('span', 'Keep on this phone'));
+    function show(n, total) {
+      st.textContent = keep.running ? 'Saving the full detail on this phone: ' + n + ' of ' + total + ' parts…'
+        : n >= total ? 'Full detail kept on this phone: the whole photo also shows without signal.'
+        : (D.overviewKept() ? 'The whole-plant overview is kept on this phone' : 'The whole-plant overview is saved on this phone when there is signal')
+          + '; sharp detail is kept for the areas already viewed.';
+      btn.hidden = n >= total && !keep.running;
+      btn.querySelector('span').textContent = keep.running ? 'Stop' : 'Keep full detail on this phone (' + Math.round(((D.man && D.man.bytes) || 0) / 1e6) + ' MB)';
+    }
+    var total = D.totalTiles();
+    D.countOnDevice().then(function (n) { show(n, total); });
+    btn.addEventListener('click', function () {
+      if (keep.running) { keep.stop = true; return; }
+      if (S.online === false || navigator.onLine === false) { u.toast('This needs a connection. Do it where there is signal.', 'warn'); return; }
+      keep.running = true; keep.stop = false; show(0, total);
+      D.keepOnDevice(function (n, t) { total = t; show(n, t); }, function () { return keep.stop; }).then(function (r) {
+        keep.running = false; show(r.done, r.total);
+        if (r.failed) u.toast(r.failed + ' parts could not be downloaded. Try again with a better signal.', 'warn');
+        else if (!r.stopped) u.toast('Drone photo kept on this phone.', 'ok');
+      }, function (e) { keep.running = false; show(0, total); u.toast(e.message, 'error'); });
+    });
+    g.appendChild(el('div.row.wrap', btn, st));
+    return g;
   }
 
   // ---------- admin multi-select ----------

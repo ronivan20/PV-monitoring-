@@ -83,6 +83,9 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = o.background ? o.background() : '#eef2f5';
       ctx.fillRect(0, 0, W, H);
+      // drone photo under the tables (same metres, so it lines up at every zoom)
+      var photo = o.underlay ? !!o.underlay(ctx, view, W, H, dpr) : false;
+      var fa = photo && o.fillAlpha ? o.fillAlpha() : 1;
       var s = view.s, tw = TW * s, th = TH * s;
       var vis = [];
       var minX = -tw, maxX = W + tw, minY = -th, maxY = H + th;
@@ -102,7 +105,7 @@
       }
       groups.forEach(function (list, key) {
         var parts = key.split('|');
-        ctx.globalAlpha = parts[1] ? 0.16 : 1;
+        ctx.globalAlpha = parts[1] ? (photo ? 0.08 : 0.16) : fa;
         ctx.fillStyle = parts[0];
         ctx.beginPath();
         list.forEach(function (t) {
@@ -123,8 +126,21 @@
         });
         ctx.fill();
       }
-      // outlines when big enough
-      if (tw > 7) {
+      // outlines: on the photo each table is framed in its status colour, so the panels stay visible
+      if (photo && tw > 2.5) {
+        ctx.lineWidth = tw > 30 ? 2 : 1.25;
+        groups.forEach(function (list, key) {
+          var parts = key.split('|');
+          if (parts[1] || parts[0] === 'none') return;
+          ctx.strokeStyle = parts[0];
+          ctx.beginPath();
+          list.forEach(function (t) {
+            var x = t.x * s + view.tx - tw / 2, y = t.y * s + view.ty - th / 2;
+            ctx.rect(x + 0.5, y + 0.5, Math.max(tw - 1, 1), Math.max(th - 1, 1));
+          });
+          ctx.stroke();
+        });
+      } else if (tw > 7) {
         ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(20,32,43,0.35)';
         ctx.beginPath();
         vis.forEach(function (t) {
@@ -164,9 +180,15 @@
           var fill = o.colorFor(t);
           ctx.fillStyle = fill === 'none' ? '#14202b' : textColor(fill);
           var lab = t.label || 'no ID';
+          if (photo) {                                   // white text with a dark halo reads on any part of the photo
+            ctx.lineJoin = 'round'; ctx.lineWidth = 3.2; ctx.strokeStyle = 'rgba(8,14,20,0.72)';
+            ctx.strokeText(lab, cx, cy - (th > 34 ? fs * 0.45 : 0));
+            ctx.fillStyle = '#ffffff';
+          }
           ctx.fillText(lab, cx, cy - (th > 34 ? fs * 0.45 : 0));
           if (th > 34 && o.subLabel) {
             ctx.font = '500 ' + Math.round(fs * 0.85) + 'px system-ui, sans-serif';
+            if (photo) ctx.strokeText(o.subLabel(t), cx, cy + fs * 0.7);
             ctx.fillText(o.subLabel(t), cx, cy + fs * 0.7);
             ctx.font = '600 ' + fs + 'px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
           }
@@ -215,6 +237,8 @@
         b.x0 = Math.min(b.x0, t.x - TW / 2); b.x1 = Math.max(b.x1, t.x + TW / 2);
         b.y0 = Math.min(b.y0, t.y - TH / 2); b.y1 = Math.max(b.y1, t.y + TH / 2);
       });
+      var ex = !list && o.extraBounds ? o.extraBounds() : null;      // e.g. the drone photo, which reaches past the tables
+      if (ex) { b.x0 = Math.min(b.x0, ex.x0); b.y0 = Math.min(b.y0, ex.y0); b.x1 = Math.max(b.x1, ex.x1); b.y1 = Math.max(b.y1, ex.y1); }
       return b;
     }
     function viewFor(b, padPx) {

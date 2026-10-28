@@ -141,7 +141,7 @@
   //  Admin
   // ======================================================================
   var A = { tab: 'users' };
-  var ATABS = [{ id: 'users', label: 'Users' }, { id: 'settings', label: 'Settings' }, { id: 'drawing', label: 'Drawing check' }];
+  var ATABS = [{ id: 'users', label: 'Users' }, { id: 'settings', label: 'Settings' }, { id: 'drone', label: 'Drone photo' }, { id: 'drawing', label: 'Drawing check' }];
   function buildAdmin(tab) {
     A.tab = ATABS.some(function (t) { return t.id === tab; }) ? tab : 'users';
     var v = u.clear(u.$('#view-admin'));
@@ -152,9 +152,10 @@
       tabs.appendChild(b);
     });
     var body = el('div#ad-body');
-    v.appendChild(el('div.page', el('div.page-head', el('div', el('h1', 'Administration'), el('p.muted', 'Users, numbering and validation rules, and the drawing check.'))), tabs, body));
+    v.appendChild(el('div.page', el('div.page-head', el('div', el('h1', 'Administration'), el('p.muted', 'Users, numbering and validation rules, the drone photo and the drawing check.'))), tabs, body));
     if (A.tab === 'users') usersTab(body);
     else if (A.tab === 'settings') settingsTab(body);
+    else if (A.tab === 'drone') droneTab(body);
     else drawingTab(body);
   }
 
@@ -339,6 +340,73 @@
         u.confirmBox('Renumber positions?', e.message, 'Renumber').then(function (ok) { if (ok) saveSetting(key, value, true); });
       } else u.toast(e.message, 'error');
     });
+  }
+
+  // ---------- drone photo ----------
+  var DR = { pkg: null, running: false, stop: false };
+  function droneTab(body) {
+    var D = SN.drone, m = S.settings.drone, has = !!(m && !m.off && m.kind === 'pvsn-drone');
+    var cur = el('section.card', el('h2', 'Drone photo on the keyplan'));
+    if (has) {
+      cur.appendChild(el('dl.kv',
+        el('dt', 'Photo'), el('dd', m.name || '—'),
+        el('dt', 'Taken'), el('dd', m.date ? u.fmtDateLong(m.date) : '—'),
+        el('dt', 'Area'), el('dd', u.num(Math.round(m.w / m.ppm)) + ' m × ' + u.num(Math.round(m.h / m.ppm)) + ' m, ' + (100 / m.ppm).toFixed(1) + ' cm per pixel at full zoom'),
+        el('dt', 'Lined up with'), el('dd', 'the keyplan tables (same metres as the General Layout); ' + ((m.align && m.align.note) || 'checked on the installed tables of every MVPS block')),
+        el('dt', 'Size'), el('dd', u.num(m.tiles || 0) + ' parts · ' + ((m.bytes || 0) / 1e6).toFixed(1) + ' MB'),
+        el('dt', 'Uploaded'), el('dd', m.uploaded_at ? u.fmtDateTime(m.uploaded_at) + (m.uploaded_by ? ' · ' + SN.userName(m.uploaded_by) : '') : '—')));
+      cur.appendChild(el('div.row',
+        el('button.btn', { type: 'button', on: { click: function () { D.setOn(true); SN.go('#/keyplan'); } } }, u.icon('map'), 'Show on the keyplan'),
+        el('button.btn.danger', { type: 'button', on: { click: function () {
+          u.confirmBox('Remove the drone photo?', 'The keyplan goes back to the plain drawing for everybody. You can upload a photo again at any time.', 'Remove').then(function (ok) {
+            if (!ok) return;
+            D.remove().then(function (r) { S.settings = r.settings; SN.bus.emit('settings'); u.toast('Drone photo removed.', 'ok'); buildAdmin('drone'); },
+              function (e) { u.toast(e.message, 'error'); });
+          });
+        } } }, u.icon('trash'), 'Remove')));
+    } else {
+      cur.appendChild(el('p.muted', 'No drone photo yet. Upload the package (.zip) made from the drone orthophoto; it is lined up with the keyplan beforehand.'));
+    }
+    body.appendChild(cur);
+
+    var file = el('input', { type: 'file', accept: '.zip,application/zip', 'aria-label': 'Drone photo package (.zip)' });
+    var info = el('p.small.muted', 'Choose the package file, for example drone-2026-10-26.zip.');
+    var prog = el('div.drone-prog', { hidden: true }, el('i'));
+    var go = el('button.btn.primary', { type: 'button', disabled: true }, u.icon('upload'), el('span', 'Upload to the keyplan'));
+    function setProg(n, t) { prog.hidden = false; prog.firstChild.style.width = (t ? Math.round(n * 100 / t) : 0) + '%'; info.textContent = 'Uploading ' + n + ' of ' + t + ' parts… keep this page open.'; }
+    file.addEventListener('change', function () {
+      DR.pkg = null; go.disabled = true; prog.hidden = true;
+      var f = file.files && file.files[0]; if (!f) return;
+      info.textContent = 'Reading the package…';
+      D.readPackage(f).then(function (pkg) {
+        DR.pkg = pkg; go.disabled = false;
+        var mm = pkg.manifest;
+        info.textContent = (mm.name || 'Drone photo') + ' · ' + u.num(pkg.tiles.length) + ' parts · ' + (pkg.bytes / 1e6).toFixed(1) + ' MB. Ready to upload.';
+      }, function (e) { info.textContent = e.message; info.className = 'small bad-text'; });
+    });
+    go.addEventListener('click', function () {
+      if (DR.running) { DR.stop = true; return; }
+      if (!DR.pkg) return;
+      if (S.online === false || navigator.onLine === false) { u.toast('Uploading needs a connection.', 'warn'); return; }
+      DR.running = true; DR.stop = false; info.className = 'small muted';
+      go.querySelector('span').textContent = 'Stop'; file.disabled = true;
+      D.uploadPackage(DR.pkg, setProg, function () { return DR.stop; }).then(function (r) {
+        DR.running = false; DR.pkg = null;
+        S.settings = r.settings; SN.bus.emit('settings');
+        D.setOn(true);
+        u.toast('Drone photo uploaded. Everybody sees it on the keyplan after the app refreshes.', 'ok', 7000);
+        buildAdmin('drone');
+      }, function (e) {
+        DR.running = false; file.disabled = false;
+        go.querySelector('span').textContent = 'Upload to the keyplan';
+        info.textContent = e.message; info.className = 'small bad-text';
+      });
+    });
+    body.appendChild(el('section.card',
+      el('h2', has ? 'Upload a newer drone photo' : 'Upload the drone photo'),
+      el('p.muted', 'The photo is kept in the project\'s private storage: only signed-in users of this app can see it. Every phone keeps the whole-plant overview (about 2 MB) for areas without signal, plus the sharp detail of the areas it has shown; "Keep full detail on this phone" in the keyplan filters saves all of it.'),
+      el('label.field', el('span', 'Drone photo package (.zip)'), file), info, prog,
+      el('div.row.end', go)));
   }
 
   // ---------- drawing check ----------

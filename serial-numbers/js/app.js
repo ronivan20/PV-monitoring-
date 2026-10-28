@@ -2,7 +2,7 @@
 (function () {
   'use strict';
   var SN = window.SN, u = SN.u, api = SN.api, el = u.el;
-  SN.version = '20261023070906';
+  SN.version = '20261029051034';
 
   var S = (SN.state = {
     me: null, settings: {}, users: new Map(), tables: new Map(), list: [], blocks: [],
@@ -231,6 +231,7 @@
     if (SN.sync) SN.sync.stop();
     api.setSession(null);
     api.clearPhotoCache();
+    if (SN.drone) { SN.drone.setManifest(null); SN.drone.clearDevice(); }
     if (tok) api.rpc('sn_logout', { p_token: tok }, { timeout: 8000 }).catch(function () {});
     SN.store.clearAll();
     S.booted = false; S.tables = new Map(); S.list = []; S.me = null; S.online = null;
