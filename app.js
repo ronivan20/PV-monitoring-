@@ -39,12 +39,11 @@
     duplicate_label: 'Drawn twice in DWG',
     half_outline: 'Only one half drawn',
     split_unresolved: 'West/East not confirmed',
-    from_photo: 'Added from drone photo',
-    moved_photo: 'Placed as built (drone photo)'
+    from_photo: 'Added from drone photo'
   };
   // where a table's outline comes from: DWG object handles, (update 11) "photo:<photo id>:<ID>" for a table seen
-  // installed on a drone photo but not drawn in the DWG, or (update 12) "b5web:<handles>" in the new Block 5 drawing
-  var DWG_FILES = { b5web: 'BLOCK 5 KEYPLAN FOR WEB APP.dwg' };
+  // installed on a drone photo but not drawn in the DWG, or (update 12) "b5r01:<handles>" in the new Block 5 drawing
+  var DWG_FILES = { b5r01: 'BLOCK 5 KEYPLAN FOR WEB APP REV.01.dwg' };
   function dwgSource(ref, plural) {
     ref = String(ref || '');
     var m = /^photo:b\d+-(\d{4})(\d{2})(\d{2}):/.exec(ref);
@@ -3293,7 +3292,7 @@
     var toggle = h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: A.reviewAll, onchange: function (e) { A.reviewAll = e.target.checked; renderAdmin(); } }),
       h('span', { text: 'Also show items already marked as checked' }));
     var card = h('div', { class: 'card' }, h('h2', { text: 'Drawing items to review' }),
-      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and, for Block 5, “BLOCK 5 KEYPLAN FOR WEB APP.dwg” (database update 12), and splitting each table into West and East sections, plus tables seen on a drone photo but not drawn in the DWG, or drawn in another place (added or placed as built, on request). Nothing was guessed: tables the drawing gives no ID wait here for their ID (Edit), and sections without an ID stay out of all counts until you resolve them.' }),
+      h('p', { class: 'card-sub', text: 'Found while reading “BLOCK 1 AND BLOCK 5 - KEYPLAN.dwg” and, for Block 5, “BLOCK 5 KEYPLAN FOR WEB APP REV.01.dwg” (database update 12), and splitting each table into West and East sections, plus tables seen installed on a drone photo but not drawn in the DWG (added on request). Nothing was guessed: tables the drawing gives no ID wait here for their ID (Edit), and sections without an ID stay out of all counts until you resolve them.' }),
       toggle);
     if (!list.length) card.append(h('div', { class: 'empty-state', text: 'Nothing open for review.' }));
     else card.append(h('div', { class: 'table-wrap' }, h('table', { class: 'dtable' },
