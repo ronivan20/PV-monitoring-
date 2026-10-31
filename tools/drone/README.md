@@ -1,5 +1,11 @@
 # Drone photos for the keyplan
 
+From database update 13, an administrator adds new photos in the app itself (Admin > Drone photos): choose the
+block, the date the photo was taken and the file (the GeoTIFF from the drone software is best). The browser places
+the photo (GPS position of a GeoTIFF, or two points), shows it over the sections for a check, makes the same
+encrypted tiles as `make_tiles.py` and uploads them to Supabase Storage. The scripts below remain for photos that
+need a closer fit than the browser can make.
+
 How a drone orthophoto becomes the encrypted photo layer of the keyplan (app update 11; Block 5 with update 12).
 
 1. **Align** the photo to the keyplan (photo pixel → keyplan metres):
@@ -9,7 +15,7 @@ How a drone orthophoto becomes the encrypted photo layer of the keyplan (app upd
    - optional check: `python3 -I refine.py --src photo.png --fit fit.json --kp kp.json --out fit2.json --look look/`
      measures the local shifts between the photo's tables and the sections in 30 m windows (`look/shifts.png`, arrows 50x)
      and keeps an affine correction only if it improves the match
-   - later photo of the same block: `python3 -I align.py --src new.png --out fit.json --ref <site> --ref-shot b1-20261026 --key drone_key.b64 [--kp kp.json] --look look/`
+   - later photo of the same block: `python3 -I align.py --src new.png --out fit.json --ref <site> --ref-shot b1-20261026 --key drone_key.b64 [--kp kp.json] [--src-mpp 0.07] --look look/`
      (matched with SIFT features to the photo already published; `--kp` adds the check against the sections)
    - look at `look/*.jpg` (keyplan sections drawn on the photo) and the quality numbers before publishing.
    - Block 1, photo of 26 Oct 2026: 0.0509 m per photo pixel, rotation 0.48°, sections match the photo's tables within
@@ -24,6 +30,9 @@ How a drone orthophoto becomes the encrypted photo layer of the keyplan (app upd
      90% within 0.23 m); checked independently with the drawing's road centre lines on the photo's gravel roads, and the
      pile marks of 287 tables across the block (median 0.10 m). The first drawing (without REV.01) put new columns 1-5 one
      table too far south, which is why a fit on those columns alone came out one table off.
+   - Block 5, GeoTIFF of 30 Oct 2026 (WGS 84 / UTM 51N, 0.07 m per pixel): matched with `--ref-shot b5-20261026 --src-mpp 0.07`
+     within 0.05 m (median of 303 windows). Its GPS position on the keyplan is stored by database update 13, so the app
+     places the next Block 5 GeoTIFF automatically.
 2. **Look for installed tables the keyplan does not have**: `python3 -I find_unlisted.py --src photo.png --fit fit.json --kp kp.json`
    lists module-covered areas outside every section (inside the sheet). Dark trees and shadows also appear; check each one
    on the photo. Block 1 (26 Oct 2026): 2 tables in row R14 between T07 and T10, added as M01-R14-T08 and M01-R14-T09

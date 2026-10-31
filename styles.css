@@ -845,3 +845,33 @@ input[type="color"] { width: 52px; height: 38px; padding: 2px; }
 }
 .layer-dialog { display: grid; gap: 12px; font-size: 14px; }
 .layer-dialog .layer-row select { font-size: 15px; }
+
+/* Admin > Drone photos (update 13) */
+.du-form { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.du-filefield input[type=file] { min-height: 44px; padding: 8px 0; }
+.du-go { margin-top: 12px; }
+.du-status { margin: 10px 0 0; color: var(--ink-2); }
+.du-step:not(:empty) { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); display: grid; gap: 12px; }
+.du-step h3, .du-block { margin: 0; font-size: 16px; }
+.du-block { margin-top: 16px; }
+.du-hint { margin: 0; padding: 10px 12px; border-radius: 8px; background: #eef4ff; color: #1e3a8a; font-size: 14px; }
+.du-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 900px) { .du-pair { grid-template-columns: 1fr; } }
+.du-pane { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #e9edf1; }
+.du-pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.du-zoom { display: flex; gap: 4px; }
+.du-zoom .btn { min-width: 36px; padding: 0 8px; }
+.du-canvas { display: block; width: 100%; height: 52vh; min-height: 300px; touch-action: none; cursor: crosshair; }
+.du-big { height: 62vh; cursor: grab; }
+.du-tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+.du-op { display: flex; align-items: center; gap: 8px; }
+.du-nudge { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.du-nudge .btn { min-width: 40px; }
+.du-nudge select { min-height: 36px; }
+.du-check { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+.du-check input { margin-top: 3px; }
+.du-bar { width: 100%; height: 10px; }
+.du-tag { display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 4px; background: var(--ink); color: #fff; font-size: 11px; font-weight: 700; vertical-align: middle; }
+.du-tbl td { vertical-align: middle; }
+.du-pend { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.notice.ok { background: #e7f6ec; color: #14532d; }

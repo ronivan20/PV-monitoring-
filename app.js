@@ -15,7 +15,7 @@
     sync: function () { return Promise.resolve(); }, on: NOOP, count: function () { return 0; }, reviewCount: function () { return 0; }, render: NOOP,
     openPanel: NOOP, forgetCache: function () { return Promise.resolve(); }, statusText: function () { return ''; }
   };
-  var DB_VERSION = 12;
+  var DB_VERSION = 13;
   // the table screens also work on update 7, so the site can be published before update 8 is run;
   // the Piles page then asks for update 8
   var MIN_DB_VERSION = 7;
@@ -412,7 +412,17 @@
   var offlineRaf = 0, qTimer = null, pTimer = null;
 
   function loadBootstrap() {
-    return readRpc('get_bootstrap', { p_token: S.token }, 45000).then(applyBoot).then(loadQuality).then(loadComments);
+    return readRpc('get_bootstrap', { p_token: S.token }, 45000).then(applyBoot).then(loadQuality).then(loadComments)
+      .then(function (r) { return loadDrones().then(function () { return r; }, function () { return r; }); });
+  }
+  // update 13: drone photos uploaded from Admin > Drone photos (their pieces are in Supabase Storage)
+  function loadDrones() {
+    if ((S.dbVersion || 0) < 13) { S.drones = null; if (window.PVMDrone && window.PVMDrone.setUploaded) window.PVMDrone.setUploaded([], ''); return Promise.resolve(); }
+    return readRpc('get_drone_photos', { p_token: S.token }).then(function (d) {
+      S.drones = d || null;
+      var base = String(CFG.supabaseUrl || '').replace(/\/+$/, '') + '/storage/v1/object/public/' + ((d && d.bucket) || 'pvm-drone') + '/';
+      if (window.PVMDrone && window.PVMDrone.setUploaded) window.PVMDrone.setUploaded(d && d.photos, base);
+    });
   }
   function applyBoot(d) {
       if (d.version < MIN_DB_VERSION || d.version > DB_VERSION) {
@@ -2922,7 +2932,7 @@
     root.append(h('div', { class: 'page-head' }, h('div', null, h('h1', { text: 'Administration' }),
       h('p', { text: 'Accounts, contractors, assignments and drawing review. Only administrators see this page.' }))));
     root.append(h('div', { class: 'subtabs', role: 'group', 'aria-label': 'Administration sections' },
-      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['targets', 'Targets'], ['quality', 'CCI & RFI'], ['review', 'Drawing review']].map(function (x) {
+      [['accounts', 'Accounts'], ['companies', 'Companies'], ['assignments', 'Assignments'], ['targets', 'Targets'], ['quality', 'CCI & RFI'], ['review', 'Drawing review'], ['drone', 'Drone photos']].map(function (x) {
         return h('button', { type: 'button', 'aria-pressed': String(A.tab === x[0]), text: x[1], onclick: function () { A.tab = x[0]; renderAdmin(true); } });
       })));
     var body = h('div', { class: 'stack', id: 'admin-body' });
@@ -2932,8 +2942,26 @@
     else if (A.tab === 'assignments') renderAssignments(body, refetch || !A.log);
     else if (A.tab === 'targets') renderTargetsAdmin(body);
     else if (A.tab === 'quality') renderQualityAdmin(body);
+    else if (A.tab === 'drone') renderDroneAdmin(body);
     else renderReview(body);
     if (!refetch) root.parentElement.scrollTop = scrollY;
+  }
+
+  // Admin > Drone photos (update 13): its code loads only when opened
+  var droneUpLoading = null;
+  function renderDroneAdmin(body) {
+    if (window.PVMDroneUpload) { window.PVMDroneUpload.render(body); return; }
+    body.append(h('p', { class: 'small muted', text: 'Loading…' }));
+    if (!droneUpLoading) {
+      droneUpLoading = new Promise(function (res, rej) {
+        var me = $('script[src*="app.js"]'), v = me ? (/[?&]v=([^&]+)/.exec(me.getAttribute('src')) || [])[1] : '';
+        var s = document.createElement('script'); s.src = 'drone-upload.js' + (v ? '?v=' + v : ''); s.onload = res;
+        s.onerror = function () { droneUpLoading = null; rej(new Error('The drone photo page could not be loaded. Check the connection and try again.')); };
+        document.head.appendChild(s);
+      });
+    }
+    droneUpLoading.then(function () { if (S.admin.tab === 'drone' && body.isConnected) { body.textContent = ''; window.PVMDroneUpload.render(body); } },
+      function (e) { body.textContent = ''; body.append(h('p', { class: 'form-error', text: e.message })); });
   }
 
   function roleOptions(selected) {
@@ -3535,6 +3563,7 @@
     S: S, h: h, $: $, $$: $$, svg: svg, append: append, rpc: rpc, call: call, toast: toast, openModal: openModal, closeModal: closeModal,
     fmtTime: fmtTime, fmtDate: fmtDate, fmtPct: fmtPct, pct1: pct1, addDays: addDays, plural: plural, natKey: natKey, cmpCode: cmpCode,
     company: company, companyName: companyName, colorOf: colorOf, activeCompanies: activeCompanies, cchip: cchip, tgtIndicator: tgtIndicator,
-    isAdmin: isAdmin, isSub: isSub, isClient: isClient, download: download, stamp: stamp, prefs: prefs, savePrefs: savePrefs, setPage: setPage
+    isAdmin: isAdmin, isSub: isSub, isClient: isClient, download: download, stamp: stamp, prefs: prefs, savePrefs: savePrefs, setPage: setPage,
+    loadDrones: loadDrones
   };
 })();

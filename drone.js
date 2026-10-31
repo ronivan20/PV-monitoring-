@@ -15,6 +15,7 @@
   var RETRY_MS = 20000;            // a tile that could not be loaded is tried again after this
   var idx = null, key = null, keyB64 = null, keyId = null, keyGen = 0, listeners = [];
   var mem = new Map(), failed = new Map(), useCounter = 0, memMax = MEM_MIN, idxLoading = null, idxText = null;
+  var uploaded = [], upSig = '';     // photos added from the app (database update 13), tiles in Supabase Storage
   function noop() { /* nothing */ }
 
   function P() { return window.PVM || {}; }
@@ -53,6 +54,20 @@
   D.clear = function () { mem.forEach(drop); mem.clear(); failed.clear(); };
   function drop(e) { e.dead = true; if (e.bmp && e.bmp.close) e.bmp.close(); if (e.url) URL.revokeObjectURL(e.url); e.bmp = null; }
   D.hasKey = function () { return !!key; };
+  D.keyB64 = function () { return keyB64; };
+  D.keyId = function () { return keyId; };
+  // photos uploaded from Admin > Drone photos (get_drone_photos): same description as photos.json, tiles under base/<id>/
+  D.setUploaded = function (list, base) {
+    var out = (list || []).filter(function (p) { return p && p.info && Array.isArray(p.info.levels) && p.info.levels.length; }).map(function (p) {
+      var i = p.info;
+      return { id: p.id, block: +p.block, date: p.date, path: base + p.id + '/', tile: i.tile || 512, fmt: i.fmt || 'webp', kid: i.kid, kp: i.kp,
+               origin: i.origin, levels: i.levels, bytes: i.bytes || 0, tiles: i.tiles, fit: i.fit || null, uploaded: true, by: p.by,
+               created_at: p.created_at, ready_at: p.ready_at, info: i };
+    });
+    var sig = JSON.stringify(out.map(function (s) { return s.id + s.path; }));
+    uploaded = out;
+    if (sig !== upSig) { upSig = sig; if (idx) prune(); changed(); }
+  };
   D.keyGiven = function () { return !!keyB64; };
   function cacheOpen() { return window.caches ? window.caches.open(CACHE) : Promise.reject(new Error('no cache storage')); }
   // the list of photos (public, small); refreshed with every data load, so new photos appear without a reload.
@@ -87,7 +102,7 @@
   };
   // tiles of photos that are no longer listed are removed from the device (a re-made photo gets a new folder)
   function prune() {
-    var keep = idx.shots.map(function (s) { return baseUrl(s.path); });
+    var keep = idx.shots.concat(uploaded).map(function (s) { return baseUrl(s.path); });
     cacheOpen().then(function (c) {
       return c.keys().then(function (reqs) {
         reqs.forEach(function (rq) {
@@ -98,7 +113,8 @@
   }
   function newestFirst(a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; }
   // every photo of a block, whatever key it needs
-  function allShots(block) { return idx ? idx.shots.filter(function (s) { return s.block === block; }).sort(newestFirst) : []; }
+  function allShots(block) { return (idx ? idx.shots : []).concat(uploaded).filter(function (s) { return s.block === block; }).sort(newestFirst); }
+  D.allShotsAny = allShots;
   // the photos the key from the sign-in opens (a photo made with another key is left out, never shown as blank)
   function opens(s) { return !!key && (!s.kid || s.kid === keyId); }
   // a photo is placed on one keyplan sheet (index.json "kp": its width and height in metres). If the block's keyplan
