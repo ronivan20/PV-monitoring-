@@ -33,6 +33,7 @@ ap.add_argument('--mpp', type=float, nargs=2, default=[0.045, 0.056], help='rang
 ap.add_argument('--rot', type=float, default=3.0, help='+- degrees of rotation to search')
 ap.add_argument('--ref'); ap.add_argument('--ref-shot'); ap.add_argument('--key')
 ap.add_argument('--look', help='folder for overlay pictures')
+ap.add_argument('--src-mpp', type=float, default=0.05, help='approximate metres per pixel of the new photo (--ref; a GeoTIFF states it)')
 a = ap.parse_args()
 t0 = time.time()
 def log(*x): print('[%4.0fs]' % (time.time() - t0), *x, flush=True)
@@ -182,8 +183,13 @@ def ref_mosaic(level):
     """the published photo of --ref-shot at one level, decrypted: (image BGR, alpha, metres per pixel, origin)"""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from PIL import Image
-    idx = json.load(open(os.path.join(a.ref, 'drone', 'index.json')))
-    s = [x for x in idx['shots'] if x['id'] == a.ref_shot][0]
+    s = None
+    for name in ('photos.json', 'index.json'):           # photos.json lists every block (update 12); index.json is the older list
+        fn = os.path.join(a.ref, 'drone', name)
+        if os.path.exists(fn):
+            s = ([x for x in json.load(open(fn))['shots'] if x['id'] == a.ref_shot] or [None])[0]
+            if s: break
+    if not s: sys.exit('photo %s is not listed in %s/drone' % (a.ref_shot, a.ref))
     aes = AESGCM(base64.b64decode(open(a.key).read().strip()))
     l = s['levels'][level]; T = s['tile']
     img = np.zeros((l['rows'] * T, l['cols'] * T, 4), np.uint8)
@@ -200,7 +206,7 @@ def sift_fit():
     correction from local shifts (phase correlation in 40 m windows) at 0.1 m per pixel"""
     sift = cv2.SIFT_create(nfeatures=40000)
     ref2, mpp2, org2, shot = ref_mosaic(2)
-    sc = 0.05 / mpp2                                   # about 5 cm per photo pixel assumed for the reduced copy
+    sc = a.src_mpp / mpp2                              # the new photo reduced to about the published level's pixel size
     new = cv2.resize(src, (int(W0 * sc), int(H0 * sc)), interpolation=cv2.INTER_AREA)
     g1 = cv2.cvtColor(new, cv2.COLOR_BGRA2GRAY); g2 = cv2.cvtColor(ref2, cv2.COLOR_BGRA2GRAY)
     k1, d1 = sift.detectAndCompute(g1, (new[:, :, 3] > 0).astype(np.uint8))
